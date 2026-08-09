@@ -1,0 +1,55 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Video Reverse Prompt",
+  "version": "0.1.0",
+  "identifier": "com.videoreverseprompt.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "node scripts/prepare-browser-hub.mjs && npm run automation:build && npm run dev -- --port 1420",
+    "beforeBuildCommand": "npm run runtime:prepare && npm run automation:build && npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Video Reverse Prompt",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 850,
+        "minHeight": 600,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "transparent": false,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob:; style-src 'self' 'unsafe-inline'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../automation/playwright-service/dist/": "automation/playwright-service/dist/",
+      "../node_modules/playwright-core/": "automation/playwright-service/node_modules/playwright-core/",
+      "../runtime/node/": "runtime/node/",
+      "../browser-hub-payload/current/": "browser-hub-payload/current/"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+:root { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif; color: #17181b; background: transparent; font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; color-scheme: light dark; }
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; min-width: 850px; min-height: 600px; height: 100%; overflow: hidden; }
+button, select, input { font: inherit; }
+button { color: inherit; }

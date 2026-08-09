@@ -1,0 +1,29 @@
+[package]
+name = "video-reverse-prompt"
+version = "0.1.0"
+description = "Video reverse engineering, script, character, and cinematic prompt studio powered by the user's Gemini Web session"
+authors = ["Video Reverse Prompt"]
+license = "MIT"
+repository = "https://github.com/xgq947-ship-it/video-reverse-prompt"
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "video_reverse_prompt_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = ["protocol-asset"] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+sha2 = "0.10"
