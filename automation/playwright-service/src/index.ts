@@ -39,14 +39,21 @@ async function execute(request: AutomationRequest): Promise<AutomationResult> {
   if (request.command === 'generate-production') {
     if (!request.reverseResponse?.trim()) throw new AutomationError('UNKNOWN', '缺少 Gemini 视频反推结果。')
     const config = request.generator ?? { provider: 'deepseek' }
-    const generated = await generateProductionPackage({
-      reverseResponse: request.reverseResponse,
-      duration: request.duration,
-      filename: request.filename,
-      provider: createGenerationProvider(config),
-      onProgress: progress,
-    })
-    return { ok: true, rawResponse: generated.rawResponse }
+    try {
+      const generated = await generateProductionPackage({
+        reverseResponse: request.reverseResponse,
+        duration: request.duration,
+        filename: request.filename,
+        provider: createGenerationProvider(config),
+        onProgress: progress,
+      })
+      return { ok: true, rawResponse: generated.rawResponse }
+    } catch (error) {
+      if (error instanceof AutomationError) throw error
+      const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+      const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ').trim().slice(0, 500)
+      throw new AutomationError('PRODUCTION_GENERATION_FAILED', message ? `生成流程失败：${message}` : '短视频剧本生成失败，请重试。', request.debug ? detail : undefined)
+    }
   }
   if (request.command === 'open') {
     progress('opening', '正在打开 Gemini 登录窗口')

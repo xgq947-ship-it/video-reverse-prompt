@@ -146,7 +146,10 @@ function App() {
     })
   }, [])
 
-  useEffect(() => { void saveSettings(settings) }, [settings])
+  const applySettings = useCallback(async (nextSettings: Settings) => {
+    await saveSettings(nextSettings)
+    setSettings(nextSettings)
+  }, [])
 
   const acceptPath = useCallback(async (path: string, source?: MediaSource) => {
     const extension = extensionOf(path)
@@ -457,7 +460,7 @@ function App() {
     <main className={view === 'settings' ? 'settings-main' : ''}>
       {view === 'main' && (!file ? <div className="home"><div className="hero-copy"><span className="eyebrow">GEMINI VIDEO REVERSE · HOTSTORY PIPELINE</span><h1>先反推原片，<br />再生成整套分镜。</h1><p>第一步沿用 Reverse Prompt 原版 Gemini 视频分析；完成后再用 DeepSeek 或 Codex CLI 生成短视频剧本、角色参考图提示词和可直接复制的多分镜视频提示词。</p><div className="hero-steps"><span><b>01</b>导入原片</span><i /><span><b>02</b>Gemini 反推</span><i /><span><b>03</b>生成剧本分镜</span></div></div><DropZone dragging={dragging} onPick={pickFile} sourceMode={sourceMode} onSourceMode={(next) => { setSourceMode(next); setLinkError('') }} videoUrl={videoUrl} onVideoUrl={(value) => { setVideoUrl(value); if (linkError) setLinkError('') }} onResolve={() => void resolveVideoLink()} resolving={resolvingLink} status={status} error={linkError} /></div> : <div className="workspace"><MediaPreview file={file} previewUrl={previewUrl} onClear={() => { setFile(null); setResult(null); setProductionResult(null); setError(''); setProductionError(''); setStage('idle'); setProductionStage('idle'); setStatus(''); setActiveHistoryId(null) }} onMetadata={(width, height, duration) => setFile((current) => current ? { ...current, width, height, duration } : current)} /><ResultPanel mode={mode} onMode={setMode} duration={file.duration} stage={stage} status={status} result={result} error={error} onAnalyze={analyze} productionResult={productionResult} productionStage={productionStage} productionStatus={productionStatus} productionError={productionError} onGenerateProduction={() => void generateProduction()} generationLabel={settings.generationProvider === 'deepseek' ? 'DeepSeek V4 Flash MAX' : 'Codex CLI'} onOpenGenerationSettings={() => { setSettingsPage('generator'); setView('settings') }} /></div>)}
       {view === 'history' && <div className="subpage"><div className="subpage-header"><div><span>VIDEO PACKAGES</span><h1>历史记录</h1></div><button className="icon-button" onClick={() => setView('main')}><X size={18} /></button></div><HistoryView items={history} onOpen={openHistoryItem} onDelete={deleteHistoryItem} onReanalyze={(item) => { void openHistoryItem(item) }} /></div>}
-      {view === 'settings' && <div className="settings-subpage"><button className="settings-close icon-button" onClick={() => setView('main')} title="关闭设置"><X size={18} /></button><SettingsView settings={settings} onChange={setSettings} connection={connection} onOpenGemini={() => void runSimple('open')} onCheck={() => void runSimple('check-login')} onCompatibility={() => void runSimple('compatibility')} checks={checks} onClearHistory={clearHistory} initialPage={settingsPage} /></div>}
+      {view === 'settings' && <div className="settings-subpage"><button className="settings-close icon-button" onClick={() => setView('main')} title="关闭设置"><X size={18} /></button><SettingsView settings={settings} onChange={applySettings} connection={connection} onOpenGemini={() => void runSimple('open')} onCheck={() => void runSimple('check-login')} onCompatibility={() => void runSimple('compatibility')} checks={checks} onClearHistory={clearHistory} initialPage={settingsPage} /></div>}
     </main>
     <footer><span>Gemini 负责原片反推 · DeepSeek/Codex 负责剧本、角色与多分镜提示词</span><span><kbd>⌘</kbd><kbd>O</kbd> 选择视频</span></footer>
   </div>

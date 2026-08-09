@@ -66,7 +66,7 @@ interface UpdateDownloadResult {
 
 interface Props {
   settings: Settings
-  onChange: (settings: Settings) => void
+  onChange: (settings: Settings) => void | Promise<void>
   connection: 'unknown' | 'connected' | 'disconnected' | 'checking'
   onOpenGemini: () => void
   onCheck: () => void
@@ -96,6 +96,14 @@ const NAV_ITEMS: { id: SettingsPage; label: string; icon: typeof Wrench }[] = [
   { id: 'updates', label: '新功能', icon: Sparkles },
   { id: 'support', label: '支持', icon: Heart },
 ]
+
+function deepSeekKeyFormatMessage(value: string): string | null {
+  const apiKey = value.trim()
+  if (!apiKey) return '请填写 DeepSeek API Key。'
+  if (/[^\x21-\x7e]/.test(apiKey)) return 'Key 中包含中文、空格或其他不支持的字符，请重新复制完整 Key。'
+  if (!apiKey.startsWith('sk-') || apiKey.length < 12) return 'Key 格式不正确，应以 sk- 开头。'
+  return null
+}
 
 function versionParts(version: string): number[] {
   return version.replace(/^v/i, '').split('.').map((part) => Number.parseInt(part, 10) || 0)
@@ -135,10 +143,24 @@ export function SettingsView({ settings, onChange, connection, onOpenGemini, onC
   const [uninstallError, setUninstallError] = useState('')
   const [generatorChecking, setGeneratorChecking] = useState(false)
   const [generatorStatus, setGeneratorStatus] = useState<Record<string, string | boolean> | null>(null)
+  const [generatorDraft, setGeneratorDraft] = useState(() => ({
+    provider: settings.generationProvider,
+    deepseekApiKey: settings.deepseekApiKey,
+  }))
+  const [generatorSaving, setGeneratorSaving] = useState(false)
+  const [generatorSaveState, setGeneratorSaveState] = useState<'idle' | 'success' | 'error'>('idle')
+  const [generatorSaveMessage, setGeneratorSaveMessage] = useState('')
   const autoChecked = useRef(false)
   const updateDownloadActive = useRef(false)
 
-  const update = <K extends keyof Settings>(key: K, value: Settings[K]) => onChange({ ...settings, [key]: value })
+  const update = <K extends keyof Settings>(key: K, value: Settings[K]) => { void onChange({ ...settings, [key]: value }) }
+
+  const changeGeneratorDraft = (next: Partial<typeof generatorDraft>) => {
+    setGeneratorDraft((current) => ({ ...current, ...next }))
+    setGeneratorStatus(null)
+    setGeneratorSaveState('idle')
+    setGeneratorSaveMessage('')
+  }
 
   const openExternal = useCallback(async (url: string) => {
     if (isTauri) await invoke('open_external', { url })
@@ -279,49 +301,91 @@ export function SettingsView({ settings, onChange, connection, onOpenGemini, onC
     }
   }
 
-  const checkGenerator = useCallback(async () => {
-    if (!isTauri) return
+  const checkGenerator = useCallback(async (): Promise<Record<string, string | boolean>> => {
+    if (!isTauri) {
+      const status = { available: false, message: '请通过 Video Reverse Prompt 桌面应用验证生成模型。' }
+      setGeneratorStatus(status)
+      return status
+    }
     setGeneratorChecking(true)
     try {
       const payload = await invoke<{ ok: boolean; generatorStatus?: Record<string, string | boolean>; error?: { message?: string } }>('run_automation', {
         request: {
           command: 'generator-status',
           generator: {
-            provider: settings.generationProvider,
-            deepseekApiKey: settings.generationProvider === 'deepseek' ? settings.deepseekApiKey : undefined,
+            provider: generatorDraft.provider,
+            deepseekApiKey: generatorDraft.provider === 'deepseek' ? generatorDraft.deepseekApiKey.trim() : undefined,
           },
         },
       })
       if (!payload.ok) throw new Error(payload.error?.message || '检测失败')
-      setGeneratorStatus(payload.generatorStatus ?? null)
+      const status = payload.generatorStatus ?? { available: false, message: '生成模型没有返回检测结果。' }
+      setGeneratorStatus(status)
+      return status
     } catch (error) {
-      setGeneratorStatus({ available: false, message: error instanceof Error ? error.message : String(error) })
+      const status = { available: false, message: error instanceof Error ? error.message : String(error) }
+      setGeneratorStatus(status)
+      return status
     } finally {
       setGeneratorChecking(false)
     }
-  }, [settings.deepseekApiKey, settings.generationProvider])
+  }, [generatorDraft.deepseekApiKey, generatorDraft.provider])
 
   useEffect(() => {
     setGeneratorStatus(null)
-    if (page === 'generator' && settings.generationProvider === 'codex_cli') void checkGenerator()
-  }, [checkGenerator, page, settings.generationProvider])
+    if (page === 'generator' && generatorDraft.provider === 'codex_cli') void checkGenerator()
+  }, [checkGenerator, generatorDraft.provider, page])
+
+  const confirmGenerator = async () => {
+    setGeneratorSaving(true)
+    setGeneratorSaveState('idle')
+    setGeneratorSaveMessage('')
+    const status = await checkGenerator()
+    if (!status.available) {
+      setGeneratorSaving(false)
+      setGeneratorSaveState('error')
+      setGeneratorSaveMessage(String(status.message || '所选生成模型当前不可用，请检查配置。'))
+      return
+    }
+    try {
+      await onChange({
+        ...settings,
+        generationProvider: generatorDraft.provider,
+        deepseekApiKey: generatorDraft.deepseekApiKey.trim(),
+      })
+      setGeneratorSaveState('success')
+      setGeneratorSaveMessage(`已保存并启用${generatorDraft.provider === 'deepseek' ? ' DeepSeek V4 Flash MAX' : ' Codex CLI'}。`)
+    } catch (error) {
+      setGeneratorSaveState('error')
+      setGeneratorSaveMessage(`保存失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setGeneratorSaving(false)
+    }
+  }
+
+  const generatorDirty = generatorDraft.provider !== settings.generationProvider
+    || generatorDraft.deepseekApiKey.trim() !== settings.deepseekApiKey.trim()
+  const deepSeekKeyError = generatorDraft.provider === 'deepseek'
+    ? deepSeekKeyFormatMessage(generatorDraft.deepseekApiKey)
+    : null
 
   const renderGenerator = () => (
     <div className="settings-page generator-page">
       <div className="settings-page-title"><span>PRODUCTION MODEL</span><h2>生成模型</h2><p>Gemini 只负责第一步视频反推；这里的模型负责剧本、角色和多分镜提示词。</p></div>
       <section className="settings-section generator-card">
-        <h3>模型来源</h3>
+        <div className="generator-section-heading"><h3>模型来源</h3><span>当前已启用：{settings.generationProvider === 'deepseek' ? 'DeepSeek V4 Flash MAX' : 'Codex CLI'}</span></div>
         <div className="provider-choice">
-          <button className={settings.generationProvider === 'deepseek' ? 'active' : ''} onClick={() => update('generationProvider', 'deepseek')}><KeyRound size={18} /><span><strong>DeepSeek</strong><small>默认 · V4 Flash MAX</small></span></button>
-          <button className={settings.generationProvider === 'codex_cli' ? 'active' : ''} onClick={() => update('generationProvider', 'codex_cli')}><Terminal size={18} /><span><strong>Codex CLI</strong><small>自动检测本机登录</small></span></button>
+          <button className={generatorDraft.provider === 'deepseek' ? 'active' : ''} onClick={() => changeGeneratorDraft({ provider: 'deepseek' })}><KeyRound size={18} /><span><strong>DeepSeek</strong><small>默认 · V4 Flash MAX</small></span></button>
+          <button className={generatorDraft.provider === 'codex_cli' ? 'active' : ''} onClick={() => changeGeneratorDraft({ provider: 'codex_cli' })}><Terminal size={18} /><span><strong>Codex CLI</strong><small>自动检测本机登录</small></span></button>
         </div>
       </section>
 
-      {settings.generationProvider === 'deepseek' ? <section className="settings-section generator-card">
+      {generatorDraft.provider === 'deepseek' ? <section className="settings-section generator-card">
         <h3>DeepSeek V4 Flash MAX</h3>
-        <label className="api-key-field"><span>API Key</span><input type="password" value={settings.deepseekApiKey} onChange={(event) => update('deepseekApiKey', event.target.value)} placeholder="sk-…" autoComplete="off" spellCheck={false} /></label>
+        <label className="api-key-field"><span>API Key</span><input type="password" value={generatorDraft.deepseekApiKey} onChange={(event) => changeGeneratorDraft({ deepseekApiKey: event.target.value })} placeholder="sk-…" autoComplete="off" spellCheck={false} aria-invalid={Boolean(deepSeekKeyError)} /></label>
+        {deepSeekKeyError && <div className="generator-validation-error"><CircleAlert size={13} />{deepSeekKeyError}</div>}
         <div className="generator-facts"><span>模型固定为 deepseek-v4-flash</span><span>Thinking 已开启</span><span>Reasoning Effort：MAX</span></div>
-        <p className="generator-note">只需填写这一项。Key 保存在本机应用设置中，调用生成阶段时通过标准输入传给内置服务，不会出现在进程命令行。</p>
+        <p className="generator-note">点击下方“验证并保存”后才会生效。Key 保存在本机应用设置中，调用生成阶段时通过标准输入传给内置服务，不会出现在进程命令行。</p>
       </section> : <section className="settings-section generator-card">
         <h3>Codex CLI</h3>
         <div className="setting-row"><div><strong>本机 Codex CLI</strong><span>{generatorStatus?.path ? String(generatorStatus.path) : '自动查找系统 PATH 与 ChatGPT App 内置 Codex'}</span></div><div className={`connection ${generatorStatus?.available ? 'connected' : ''}`}>{generatorChecking ? <LoaderCircle className="spin" size={14} /> : generatorStatus?.available ? <CheckCircle2 size={14} /> : <CircleAlert size={14} />}{generatorChecking ? '检测中' : generatorStatus?.available ? '可用' : '未检测'}</div></div>
@@ -330,6 +394,17 @@ export function SettingsView({ settings, onChange, connection, onOpenGemini, onC
         <div className="button-row"><button className="quiet-button" onClick={() => void checkGenerator()} disabled={generatorChecking}><RefreshCw size={14} />重新自动检测</button></div>
         <p className="generator-note">无需填写路径、模型或 Key。应用使用本机已登录的 Codex CLI，并以临时会话和只读沙箱执行纯文本生成。</p>
       </section>}
+
+      <section className={`generator-save-card ${generatorSaveState}`}>
+        <div className="generator-save-copy">
+          {generatorSaveState === 'success' ? <CheckCircle2 size={17} /> : generatorSaveState === 'error' ? <CircleAlert size={17} /> : <Info size={17} />}
+          <div><strong>{generatorDirty ? '模型设置尚未确认' : '确认当前模型设置'}</strong><span>{generatorSaveMessage || (generatorDirty ? '点击验证并保存后，所选模型才会用于第二步生成。' : '可重新验证凭证与模型可用性。')}</span></div>
+        </div>
+        <button className="generator-save-button" onClick={() => void confirmGenerator()} disabled={generatorSaving || generatorChecking || Boolean(deepSeekKeyError)}>
+          {generatorSaving || generatorChecking ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}
+          {generatorSaving || generatorChecking ? '正在验证…' : '验证并保存'}
+        </button>
+      </section>
 
       <section className="skill-integrity-card"><ShieldCheck size={19} /><div><strong>HotStory 原始工作流</strong><p>角色、剧本、分镜模板及 Lira、Acting、CINEDANCE 三份完整 Skill 原文均随应用打包；缺失时直接停止，不会降级为摘要。</p></div></section>
     </div>

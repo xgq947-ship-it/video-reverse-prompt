@@ -4,6 +4,8 @@ import test from 'node:test'
 import ts from 'typescript'
 
 const source = await readFile(new URL('../src/types/index.ts', import.meta.url), 'utf8')
+const settingsViewSource = await readFile(new URL('../src/components/SettingsView.tsx', import.meta.url), 'utf8')
+const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 }).outputText
@@ -16,4 +18,16 @@ test('浏览器默认在后台执行', () => {
 test('第二步默认 DeepSeek V4 Flash MAX 且只需填写 Key', () => {
   assert.equal(DEFAULT_SETTINGS.generationProvider, 'deepseek')
   assert.equal(DEFAULT_SETTINGS.deepseekApiKey, '')
+})
+
+test('生成模型作为草稿选择，必须验证并保存后才生效', () => {
+  assert.match(settingsViewSource, /generatorDraft/)
+  assert.match(settingsViewSource, /验证并保存/)
+  assert.match(settingsViewSource, /await onChange\(/)
+  assert.doesNotMatch(settingsViewSource, /onClick=\{\(\) => update\('generationProvider'/)
+})
+
+test('设置加载前不会用默认值自动覆盖本机配置', () => {
+  assert.match(appSource, /const applySettings = useCallback/)
+  assert.doesNotMatch(appSource, /useEffect\(\(\) => \{ void saveSettings\(settings\) \}/)
 })
