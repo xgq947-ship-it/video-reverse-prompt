@@ -3,10 +3,13 @@ const XHUS_DOUYIN_API_ORIGIN = 'https://api.xhus.cn/api/douyin'
 const TIKWM_API_ORIGIN = 'https://www.tikwm.com/api/'
 const FXTWITTER_API_ORIGIN = 'https://api.fxtwitter.com/2/status'
 const DEFAULT_TIMEOUT_MS = 30_000
+const MAX_DOUYIN_PAGE_LENGTH = 5 * 1024 * 1024
+const MAX_DOUYIN_REDIRECTS = 5
 const DIRECT_VIDEO_EXTENSION_RE = /\.(?:mp4|mov|m4v|webm)(?:$|[?#])/i
 const TRAILING_SHARE_PUNCTUATION_RE = /[)\]}>，。！？；：、）》】」』"'`.,!?;:]+$/u
 const TIKWM_HOST_RE = /(?:^|\.)(?:douyin\.com|iesdouyin\.com|tiktok\.com)$/i
 const TWITTER_HOST_RE = /(?:^|\.)(?:x\.com|twitter\.com)$/i
+const DOUYIN_SHARE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
 
 type JsonRecord = Record<string, unknown>
 
@@ -49,6 +52,15 @@ function optionalString(value: unknown): string | undefined {
 function optionalNumber(value: unknown): number | undefined {
   const number = Number(value)
   return Number.isFinite(number) && number >= 0 ? number : undefined
+}
+
+function serviceMessage(value: unknown, fallback: string): string {
+  const message = optionalString(value)
+  if (!message) return fallback
+  const beforeMarkup = message.split(/<(?:!doctype|html|head|body|script|link|meta)\b/i)[0]
+  const normalized = beforeMarkup.replace(/\s+/g, ' ').trim()
+  if (!normalized) return fallback
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}…` : normalized
 }
 
 export function extractMediaUrl(input: string): string {
@@ -97,13 +109,13 @@ async function readJsonResponse(response: Response, endpointName: string): Promi
   }
   if (!response.ok) {
     throw new MediaResolverError(
-      optionalString(payload.error) || optionalString(payload.message) || `${endpointName}请求失败（HTTP ${response.status}）`,
+      serviceMessage(payload.error, serviceMessage(payload.message, `${endpointName}请求失败（HTTP ${response.status}）`)),
       { code: 'MEDIA_RESOLVER_HTTP_ERROR' },
     )
   }
   if (payload.error) {
     const nestedError = isRecord(payload.error) ? optionalString(payload.error.message) || optionalString(payload.error.code) : undefined
-    throw new MediaResolverError(nestedError || String(payload.error), { code: 'MEDIA_RESOLVER_REJECTED' })
+    throw new MediaResolverError(serviceMessage(nestedError || payload.error, `${endpointName}拒绝了解析请求`), { code: 'MEDIA_RESOLVER_REJECTED' })
   }
   return payload
 }
@@ -166,10 +178,192 @@ function isDouyinUrl(sourceUrl: string): boolean {
   return hostnameMatches(sourceUrl, /(?:^|\.)(?:douyin\.com|iesdouyin\.com)$/i)
 }
 
+function isRedirectStatus(status: number): boolean {
+  return [301, 302, 303, 307, 308].includes(status)
+}
+
+function trustedDouyinUrl(value: string, base?: string): string {
+  let parsed: URL
+  try {
+    parsed = new URL(value, base)
+  } catch {
+    throw new MediaResolverError('抖音分享页返回了无效的跳转地址', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || !isDouyinUrl(parsed.toString())) {
+    throw new MediaResolverError('抖音分享页跳转到了不受信任的地址', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+  }
+  return parsed.toString()
+}
+
+async function getDouyinSharePage(fetchImpl: typeof fetch, sourceUrl: string, timeoutMs: number): Promise<string> {
+  const timeout = createTimeoutSignal(timeoutMs)
+  try {
+    let currentUrl = trustedDouyinUrl(sourceUrl)
+    for (let redirectCount = 0; redirectCount <= MAX_DOUYIN_REDIRECTS; redirectCount += 1) {
+      const response = await fetchImpl(currentUrl, {
+        method: 'GET',
+        redirect: 'manual',
+        headers: {
+          accept: 'text/html,application/xhtml+xml',
+          'user-agent': DOUYIN_SHARE_USER_AGENT,
+        },
+        signal: timeout.signal,
+      })
+      if (isRedirectStatus(response.status)) {
+        const location = response.headers.get('location')
+        if (!location) {
+          throw new MediaResolverError('抖音分享页跳转缺少目标地址', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+        }
+        if (redirectCount === MAX_DOUYIN_REDIRECTS) {
+          throw new MediaResolverError('抖音分享页跳转次数过多', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+        }
+        currentUrl = trustedDouyinUrl(location, currentUrl)
+        continue
+      }
+      if (!response.ok) {
+        throw new MediaResolverError(`抖音分享页请求失败（HTTP ${response.status}）`, { code: 'MEDIA_RESOLVER_HTTP_ERROR' })
+      }
+      const html = await response.text()
+      if (!html.trim()) {
+        throw new MediaResolverError('抖音分享页返回了空响应', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+      }
+      if (html.length > MAX_DOUYIN_PAGE_LENGTH) {
+        throw new MediaResolverError('抖音分享页响应过大', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+      }
+      return html
+    }
+    throw new MediaResolverError('抖音分享页跳转次数过多', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+  } catch (error) {
+    if (error instanceof MediaResolverError) throw error
+    const timedOut = timeout.signal.aborted
+    throw new MediaResolverError(
+      timedOut ? '抖音分享页请求超时，请稍后重试' : `抖音分享页不可用：${error instanceof Error ? error.message : '网络请求失败'}`,
+      { code: timedOut ? 'MEDIA_RESOLVER_TIMEOUT' : 'MEDIA_RESOLVER_UNAVAILABLE', cause: error },
+    )
+  } finally {
+    timeout.clear()
+  }
+}
+
+function parseWindowObject(html: string, variableName: string): JsonRecord | null {
+  const assignment = html.indexOf(variableName)
+  if (assignment < 0) return null
+  const start = html.indexOf('{', assignment + variableName.length)
+  if (start < 0) return null
+
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  for (let index = start; index < html.length; index += 1) {
+    const character = html[index]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') quoted = false
+      continue
+    }
+    if (character === '"') {
+      quoted = true
+      continue
+    }
+    if (character === '{') depth += 1
+    if (character !== '}') continue
+    depth -= 1
+    if (depth !== 0) continue
+    try {
+      const parsed: unknown = JSON.parse(html.slice(start, index + 1))
+      return isRecord(parsed) ? parsed : null
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+function firstRecord(value: unknown): JsonRecord | null {
+  return Array.isArray(value) ? value.find(isRecord) ?? null : null
+}
+
+function douyinVideoItem(routerData: JsonRecord): JsonRecord | null {
+  const loaderData = isRecord(routerData.loaderData) ? routerData.loaderData : null
+  if (loaderData) {
+    for (const routeData of Object.values(loaderData)) {
+      if (!isRecord(routeData)) continue
+      const videoInfo = isRecord(routeData.videoInfoRes) ? routeData.videoInfoRes : null
+      const item = firstRecord(videoInfo?.item_list)
+      if (item) return item
+    }
+  }
+
+  const queue: unknown[] = [routerData]
+  for (let index = 0; index < queue.length && index < 2_000; index += 1) {
+    const value = queue[index]
+    if (Array.isArray(value)) {
+      queue.push(...value)
+      continue
+    }
+    if (!isRecord(value)) continue
+    if (isRecord(value.video) && optionalString(value.aweme_id)) return value
+    queue.push(...Object.values(value))
+  }
+  return null
+}
+
+function firstUrl(value: unknown): string | undefined {
+  if (!isRecord(value) || !Array.isArray(value.url_list)) return undefined
+  return value.url_list.map(optionalString).find((url): url is string => Boolean(url))
+}
+
+function cleanDouyinVideoUrl(value: string): { primary: string; alternate?: string; watermarkStatus: 'removed' | 'original' } {
+  try {
+    const parsed = new URL(value)
+    if (!parsed.pathname.includes('/playwm/')) return { primary: parsed.toString(), watermarkStatus: 'original' }
+    const alternate = parsed.toString()
+    parsed.pathname = parsed.pathname.replace('/playwm/', '/play/')
+    parsed.searchParams.delete('logo_name')
+    return { primary: parsed.toString(), alternate, watermarkStatus: 'removed' }
+  } catch {
+    throw new MediaResolverError('抖音分享页返回了无效的视频地址', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+  }
+}
+
 function authorName(value: unknown): string | undefined {
   if (typeof value === 'string') return optionalString(value)
   if (!isRecord(value)) return undefined
   return optionalString(value.nickname) || optionalString(value.name) || optionalString(value.unique_id) || optionalString(value.screen_name)
+}
+
+async function resolveWithDouyinSharePage(fetchImpl: typeof fetch, sourceUrl: string, timeoutMs: number): Promise<ResolvedMedia> {
+  const html = await getDouyinSharePage(fetchImpl, sourceUrl, timeoutMs)
+  const routerData = parseWindowObject(html, 'window._ROUTER_DATA')
+  const item = routerData ? douyinVideoItem(routerData) : null
+  if (!item) {
+    throw new MediaResolverError('抖音分享页没有返回可用的视频数据', { code: 'MEDIA_RESOLVER_PROTOCOL_CHANGED' })
+  }
+  const video = isRecord(item.video) ? item.video : null
+  const videoUrl = firstUrl(video?.play_addr)
+    || firstUrl(video?.play_addr_h264)
+    || firstUrl(video?.download_addr)
+  if (!video || !videoUrl) {
+    throw new MediaResolverError('当前抖音链接不是可下载的视频，可能是图集、私密或已删除内容', { code: 'UNSUPPORTED_MEDIA_TYPE' })
+  }
+  const cleaned = cleanDouyinVideoUrl(videoUrl)
+  const durationMs = optionalNumber(video.duration)
+  return {
+    sourceUrl,
+    platform: 'douyin',
+    type: 'video',
+    title: optionalString(item.desc),
+    coverUrl: firstUrl(video.cover) || firstUrl(video.origin_cover) || firstUrl(video.dynamic_cover),
+    videoUrl: cleaned.primary,
+    metadata: {
+      resolver: 'douyin-share-page',
+      author: authorName(item.author),
+      duration: durationMs === undefined ? undefined : durationMs / 1_000,
+      watermarkStatus: cleaned.watermarkStatus,
+      alternateVideoUrl: cleaned.alternate,
+    },
+  }
 }
 
 async function resolveWithXhus(fetchImpl: typeof fetch, sourceUrl: string, timeoutMs: number): Promise<ResolvedMedia> {
@@ -181,7 +375,7 @@ async function resolveWithXhus(fetchImpl: typeof fetch, sourceUrl: string, timeo
   )
   const data = isRecord(payload.data) ? payload.data : null
   if (Number(payload.code) !== 200 || !data) {
-    throw new MediaResolverError(optionalString(payload.msg) || '抖音解析接口没有返回可用数据', { code: 'MEDIA_RESOLVER_REJECTED' })
+    throw new MediaResolverError(serviceMessage(payload.msg, '抖音解析接口没有返回可用数据'), { code: 'MEDIA_RESOLVER_REJECTED' })
   }
   const videoUrl = optionalString(data.url)
   if (!videoUrl || (typeof data.images === 'string' && data.images !== '当前为短视频解析模式')) {
@@ -211,7 +405,7 @@ async function resolveWithTikwm(fetchImpl: typeof fetch, sourceUrl: string, time
   )
   const data = isRecord(payload.data) ? payload.data : null
   if (Number(payload.code) !== 0 || !data) {
-    throw new MediaResolverError(optionalString(payload.msg) || 'TikWM 没有返回可用的视频', { code: 'MEDIA_RESOLVER_REJECTED' })
+    throw new MediaResolverError(serviceMessage(payload.msg, 'TikWM 没有返回可用的视频'), { code: 'MEDIA_RESOLVER_REJECTED' })
   }
 
   const cleanVideoUrl = optionalString(data.hdplay) || optionalString(data.play)
@@ -344,11 +538,28 @@ export class SocialVideoProvider {
       return resolveWithFxTwitter(this.fetchImpl, sourceUrl, this.timeoutMs)
     }
     if (isDouyinUrl(sourceUrl)) {
+      const errors: unknown[] = []
+      try {
+        return await resolveWithDouyinSharePage(this.fetchImpl, sourceUrl, this.timeoutMs)
+      } catch (error) {
+        errors.push(error)
+      }
       try {
         return await resolveWithXhus(this.fetchImpl, sourceUrl, this.timeoutMs)
-      } catch (xhusError) {
-        try { return await resolveWithTikwm(this.fetchImpl, sourceUrl, this.timeoutMs) } catch { throw xhusError }
+      } catch (error) {
+        errors.push(error)
       }
+      try {
+        return await resolveWithTikwm(this.fetchImpl, sourceUrl, this.timeoutMs)
+      } catch (error) {
+        errors.push(error)
+      }
+      const unsupported = errors.find((error) => error instanceof MediaResolverError && error.code === 'UNSUPPORTED_MEDIA_TYPE')
+      if (unsupported instanceof MediaResolverError) throw unsupported
+      throw new MediaResolverError('抖音视频解析暂时不可用，请确认作品可公开播放后重试', {
+        code: 'MEDIA_RESOLVER_UNAVAILABLE',
+        cause: new AggregateError(errors, '所有抖音解析方式均失败'),
+      })
     }
     if (hostnameMatches(sourceUrl, TIKWM_HOST_RE)) {
       return resolveWithTikwm(this.fetchImpl, sourceUrl, this.timeoutMs)
@@ -362,7 +573,7 @@ export class SocialVideoProvider {
       userInput: String(userInput || sourceUrl).trim(),
     }, this.timeoutMs)
     if (parsed.success === false) {
-      throw new MediaResolverError(optionalString(parsed.error) || '媒体解析失败', { code: 'MEDIA_RESOLVER_REJECTED' })
+      throw new MediaResolverError(serviceMessage(parsed.error, '媒体解析失败'), { code: 'MEDIA_RESOLVER_REJECTED' })
     }
     const data = isRecord(parsed.data) ? parsed.data : null
     if (!data) {
