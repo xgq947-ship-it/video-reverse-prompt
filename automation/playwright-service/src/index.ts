@@ -3,8 +3,9 @@ import { stdin } from 'node:process'
 import { AutomationError, ERROR_MESSAGES, normalizeError } from './errors.js'
 import { GeminiAdapter } from './gemini/adapter.js'
 import { openGeminiLoginWindow } from './gemini/browser.js'
+import { generateProductionPackage } from './generation/pipeline.js'
+import { createGenerationProvider, generatorStatus } from './generation/providers.js'
 import { resolveAndDownloadVideo } from './media/downloader.js'
-import { augmentPromptWithVerbatimSkills } from './prompts/skills.js'
 import type { AutomationRequest, AutomationResult, WireMessage } from './types.js'
 
 function emit(message: WireMessage): void { process.stdout.write(`${JSON.stringify(message)}\n`) }
@@ -30,6 +31,22 @@ async function execute(request: AutomationRequest): Promise<AutomationResult> {
     })
     progress('preparing', '视频已保存，可以开始反推')
     return { ok: true, importedVideo }
+  }
+  if (request.command === 'generator-status') {
+    const config = request.generator ?? { provider: 'deepseek' }
+    return { ok: true, generatorStatus: await generatorStatus(config) }
+  }
+  if (request.command === 'generate-production') {
+    if (!request.reverseResponse?.trim()) throw new AutomationError('UNKNOWN', '缺少 Gemini 视频反推结果。')
+    const config = request.generator ?? { provider: 'deepseek' }
+    const generated = await generateProductionPackage({
+      reverseResponse: request.reverseResponse,
+      duration: request.duration,
+      filename: request.filename,
+      provider: createGenerationProvider(config),
+      onProgress: progress,
+    })
+    return { ok: true, rawResponse: generated.rawResponse }
   }
   if (request.command === 'open') {
     progress('opening', '正在打开 Gemini 登录窗口')
@@ -62,11 +79,10 @@ async function execute(request: AutomationRequest): Promise<AutomationResult> {
       await access(request.filePath)
       progress('uploading', '正在通过 HTTP 上传文件')
     }
-    const expanded = await augmentPromptWithVerbatimSkills(request.prompt)
-    progress('sending', expanded.source === 'verbatim' ? '正在加载完整 Skill 并生成视频提示词包' : '正在使用内置工作流生成视频提示词包')
+    progress('sending', request.command === 'refine' ? '正在发送调整要求' : '正在发送原版视频反推提示词')
     const rawResponse = request.command === 'refine'
-      ? await adapter.refine(expanded.prompt)
-      : await adapter.analyzeFile(request.filePath!, expanded.prompt)
+      ? await adapter.refine(request.prompt)
+      : await adapter.analyzeFile(request.filePath!, request.prompt)
     progress('extracting', '正在整理结果')
     return { ok: true, loggedIn: true, rawResponse }
   } finally {

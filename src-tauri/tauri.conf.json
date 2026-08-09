@@ -42,7 +42,8 @@
       "../automation/playwright-service/dist/": "automation/playwright-service/dist/",
       "../node_modules/playwright-core/": "automation/playwright-service/node_modules/playwright-core/",
       "../runtime/node/": "runtime/node/",
-      "../browser-hub-payload/current/": "browser-hub-payload/current/"
+      "../browser-hub-payload/current/": "browser-hub-payload/current/",
+      "../skills/": "skills/"
     },
     "icon": [
       "icons/32x32.png",

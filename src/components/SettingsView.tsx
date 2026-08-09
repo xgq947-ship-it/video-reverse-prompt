@@ -11,11 +11,13 @@ import {
   ExternalLink,
   Heart,
   Info,
+  KeyRound,
   LoaderCircle,
   RefreshCw,
   Search,
   ShieldCheck,
   Sparkles,
+  Terminal,
   Trash2,
   Wrench,
   XCircle,
@@ -30,7 +32,7 @@ const WECHAT_ID = 'Moment_oo7'
 const FALLBACK_VERSION = '0.1.0'
 const isTauri = '__TAURI_INTERNALS__' in window
 
-type SettingsPage = 'advanced' | 'about' | 'updates' | 'support'
+type SettingsPage = 'generator' | 'advanced' | 'about' | 'updates' | 'support'
 type UpdateState = 'idle' | 'checking' | 'current' | 'available' | 'downloading' | 'ready' | 'installing' | 'error'
 
 interface ReleaseAsset {
@@ -71,6 +73,7 @@ interface Props {
   onCompatibility: () => void
   checks: Record<string, boolean> | null
   onClearHistory: () => void
+  initialPage?: 'generator' | 'about'
 }
 
 const LOCAL_RELEASES: ReleaseInfo[] = [
@@ -82,11 +85,12 @@ const LOCAL_RELEASES: ReleaseInfo[] = [
     draft: false,
     prerelease: false,
     assets: [],
-    body: '从 Reverse Prompt 独立拆分为纯视频项目\n支持对白识别开关：开启生成含逐字台词剧本，关闭生成纯画面剧本\n按原视频时长拆分为单镜头不超过 10 秒的连续成片提示词\n新增可选角色参考图提示词与表演主档案\n接入 HotStory 同源的剧本、角色、表演、分镜与成片工作流\n支持从本机逐字加载 lira-image-prompts、acting-ai-video、cinedance-higgsfield 三份完整 SKILL.md',
+    body: '从 Reverse Prompt 独立拆分为纯视频项目\n第一步恢复 Reverse Prompt 原版 Gemini 九分区视频反推\n反推完成后新增“生成短视频剧本”第二步\n第二步支持 DeepSeek V4 Flash MAX 与本机 Codex CLI\n逐字内置 HotStory 四份提示词模板\n完整内置 lira-image-prompts、acting-ai-video、cinedance-higgsfield 三份 SKILL.md\n自动生成角色参考图、表演主档案与多分镜成片提示词',
   },
 ]
 
 const NAV_ITEMS: { id: SettingsPage; label: string; icon: typeof Wrench }[] = [
+  { id: 'generator', label: '生成模型', icon: Sparkles },
   { id: 'advanced', label: '高级', icon: Wrench },
   { id: 'about', label: '关于', icon: Info },
   { id: 'updates', label: '新功能', icon: Sparkles },
@@ -117,8 +121,8 @@ function releaseLines(body: string | null): string[] {
     .slice(0, 12)
 }
 
-export function SettingsView({ settings, onChange, connection, onOpenGemini, onCheck, onCompatibility, checks, onClearHistory }: Props) {
-  const [page, setPage] = useState<SettingsPage>('about')
+export function SettingsView({ settings, onChange, connection, onOpenGemini, onCheck, onCompatibility, checks, onClearHistory, initialPage = 'about' }: Props) {
+  const [page, setPage] = useState<SettingsPage>(initialPage)
   const [search, setSearch] = useState('')
   const [currentVersion, setCurrentVersion] = useState(FALLBACK_VERSION)
   const [releases, setReleases] = useState<ReleaseInfo[]>(LOCAL_RELEASES)
@@ -129,6 +133,8 @@ export function SettingsView({ settings, onChange, connection, onOpenGemini, onC
   const [copied, setCopied] = useState(false)
   const [uninstalling, setUninstalling] = useState(false)
   const [uninstallError, setUninstallError] = useState('')
+  const [generatorChecking, setGeneratorChecking] = useState(false)
+  const [generatorStatus, setGeneratorStatus] = useState<Record<string, string | boolean> | null>(null)
   const autoChecked = useRef(false)
   const updateDownloadActive = useRef(false)
 
@@ -273,13 +279,69 @@ export function SettingsView({ settings, onChange, connection, onOpenGemini, onC
     }
   }
 
+  const checkGenerator = useCallback(async () => {
+    if (!isTauri) return
+    setGeneratorChecking(true)
+    try {
+      const payload = await invoke<{ ok: boolean; generatorStatus?: Record<string, string | boolean>; error?: { message?: string } }>('run_automation', {
+        request: {
+          command: 'generator-status',
+          generator: {
+            provider: settings.generationProvider,
+            deepseekApiKey: settings.generationProvider === 'deepseek' ? settings.deepseekApiKey : undefined,
+          },
+        },
+      })
+      if (!payload.ok) throw new Error(payload.error?.message || '检测失败')
+      setGeneratorStatus(payload.generatorStatus ?? null)
+    } catch (error) {
+      setGeneratorStatus({ available: false, message: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setGeneratorChecking(false)
+    }
+  }, [settings.deepseekApiKey, settings.generationProvider])
+
+  useEffect(() => {
+    setGeneratorStatus(null)
+    if (page === 'generator' && settings.generationProvider === 'codex_cli') void checkGenerator()
+  }, [checkGenerator, page, settings.generationProvider])
+
+  const renderGenerator = () => (
+    <div className="settings-page generator-page">
+      <div className="settings-page-title"><span>PRODUCTION MODEL</span><h2>生成模型</h2><p>Gemini 只负责第一步视频反推；这里的模型负责剧本、角色和多分镜提示词。</p></div>
+      <section className="settings-section generator-card">
+        <h3>模型来源</h3>
+        <div className="provider-choice">
+          <button className={settings.generationProvider === 'deepseek' ? 'active' : ''} onClick={() => update('generationProvider', 'deepseek')}><KeyRound size={18} /><span><strong>DeepSeek</strong><small>默认 · V4 Flash MAX</small></span></button>
+          <button className={settings.generationProvider === 'codex_cli' ? 'active' : ''} onClick={() => update('generationProvider', 'codex_cli')}><Terminal size={18} /><span><strong>Codex CLI</strong><small>自动检测本机登录</small></span></button>
+        </div>
+      </section>
+
+      {settings.generationProvider === 'deepseek' ? <section className="settings-section generator-card">
+        <h3>DeepSeek V4 Flash MAX</h3>
+        <label className="api-key-field"><span>API Key</span><input type="password" value={settings.deepseekApiKey} onChange={(event) => update('deepseekApiKey', event.target.value)} placeholder="sk-…" autoComplete="off" spellCheck={false} /></label>
+        <div className="generator-facts"><span>模型固定为 deepseek-v4-flash</span><span>Thinking 已开启</span><span>Reasoning Effort：MAX</span></div>
+        <p className="generator-note">只需填写这一项。Key 保存在本机应用设置中，调用生成阶段时通过标准输入传给内置服务，不会出现在进程命令行。</p>
+      </section> : <section className="settings-section generator-card">
+        <h3>Codex CLI</h3>
+        <div className="setting-row"><div><strong>本机 Codex CLI</strong><span>{generatorStatus?.path ? String(generatorStatus.path) : '自动查找系统 PATH 与 ChatGPT App 内置 Codex'}</span></div><div className={`connection ${generatorStatus?.available ? 'connected' : ''}`}>{generatorChecking ? <LoaderCircle className="spin" size={14} /> : generatorStatus?.available ? <CheckCircle2 size={14} /> : <CircleAlert size={14} />}{generatorChecking ? '检测中' : generatorStatus?.available ? '可用' : '未检测'}</div></div>
+        {(generatorStatus?.version || generatorStatus?.loginStatus) && <div className="generator-facts"><span>{String(generatorStatus.version || '')}</span>{generatorStatus?.loginStatus && <span>{String(generatorStatus.loginStatus)}</span>}</div>}
+        {generatorStatus?.message && <div className="inline-generation-error">{String(generatorStatus.message)}</div>}
+        <div className="button-row"><button className="quiet-button" onClick={() => void checkGenerator()} disabled={generatorChecking}><RefreshCw size={14} />重新自动检测</button></div>
+        <p className="generator-note">无需填写路径、模型或 Key。应用使用本机已登录的 Codex CLI，并以临时会话和只读沙箱执行纯文本生成。</p>
+      </section>}
+
+      <section className="skill-integrity-card"><ShieldCheck size={19} /><div><strong>HotStory 原始工作流</strong><p>角色、剧本、分镜模板及 Lira、Acting、CINEDANCE 三份完整 Skill 原文均随应用打包；缺失时直接停止，不会降级为摘要。</p></div></section>
+    </div>
+  )
+
   const renderAbout = () => (
     <div className="settings-page about-page">
       <section className="about-hero">
         <img src={appIcon} alt="Video Reverse Prompt 图标" />
         <h2>Video Reverse Prompt</h2>
         <p className="app-version">版本 {currentVersion}</p>
-        <p className="about-description">你的本地 AI 视频逆向导演工作台。<br />从参考视频生成剧本、可选角色资产和可直接复制的逐镜头成片提示词。</p>
+        <p className="about-description">你的本地 AI 视频逆向导演工作台。<br />先用 Gemini 反推参考视频，再生成剧本、角色资产和可直接复制的多分镜成片提示词。</p>
         <div className="about-actions">
           <button onClick={() => setPage('updates')}>查看新功能</button>
           <button className="link-button" onClick={() => void openExternal(REPOSITORY_URL)}>在 GitHub 上查看 <ExternalLink size={14} /></button>
@@ -354,6 +416,7 @@ export function SettingsView({ settings, onChange, connection, onOpenGemini, onC
     </aside>
     <div className="settings-content">
       {page === 'about' && renderAbout()}
+      {page === 'generator' && renderGenerator()}
       {page === 'updates' && renderUpdates()}
       {page === 'support' && renderSupport()}
       {page === 'advanced' && renderAdvanced()}

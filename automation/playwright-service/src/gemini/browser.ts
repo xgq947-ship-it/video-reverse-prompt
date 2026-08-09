@@ -133,7 +133,7 @@ async function pageTargetId(page: Page): Promise<string> {
 async function isVideoReversePromptConversation(page: Page): Promise<boolean> {
   if (!normalizeConversationUrl(page.url())) return false
   const text = await page.locator('body').innerText({ timeout: 1200 }).catch(() => '')
-  return /---VIDEO_OVERVIEW---|---REVERSE_PROMPT---|---SHOT_PROMPTS---|本次调整要求：/.test(text)
+  return /---VIDEO_OVERVIEW---|---TIMELINE---|---MOTION_PROMPT---|本次调整要求：/.test(text)
 }
 
 interface ProjectPageResult {

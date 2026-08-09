@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "tauri": "tauri",
-    "automation:build": "tsc -p automation/playwright-service/tsconfig.json",
+    "automation:build": "tsc -p automation/playwright-service/tsconfig.json && node scripts/copy-hotstory-prompts.mjs",
     "runtime:prepare": "node scripts/prepare-node-runtime.mjs && node scripts/prepare-browser-hub.mjs",
     "hub:sync": "node scripts/sync-browser-hub-lock.mjs",
     "test": "npm run automation:build && node --test test/*.test.mjs",

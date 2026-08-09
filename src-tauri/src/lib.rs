@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
   fs,
-  io::{BufRead, BufReader},
+  io::{BufRead, BufReader, Write},
   path::{Path, PathBuf},
   process::{Command, Stdio},
   thread,
@@ -34,6 +34,10 @@ struct AutomationRequest {
   prompt: Option<String>,
   media_input: Option<String>,
   output_dir: Option<String>,
+  reverse_response: Option<String>,
+  duration: Option<f64>,
+  filename: Option<String>,
+  generator: Option<Value>,
   browser_behavior: Option<String>,
   debug: Option<bool>,
 }
@@ -186,14 +190,17 @@ async fn run_automation(app: tauri::AppHandle, mut request: AutomationRequest) -
     if !cfg!(debug_assertions) && !runtime.exists() {
       return Err("内置 Node.js 运行时缺失，请重新安装应用。".to_string());
     }
-    let needs_browser = request.command != "resolve-video";
+    let needs_browser = matches!(
+      request.command.as_str(),
+      "open" | "check-login" | "compatibility" | "analyze" | "refine"
+    );
     let hub_payload = if needs_browser {
       let payload = browser_hub_payload(&app)?;
       if !payload.exists() {
         return Err("共享浏览器运行时缺失，请重新安装应用。".to_string());
       }
       Some(payload)
-    } else {
+    } else if request.command == "resolve-video" {
       let imports_dir = app
         .path()
         .app_cache_dir()
@@ -202,22 +209,42 @@ async fn run_automation(app: tauri::AppHandle, mut request: AutomationRequest) -
       fs::create_dir_all(&imports_dir).map_err(|_| "无法创建视频缓存目录。".to_string())?;
       request.output_dir = Some(imports_dir.to_string_lossy().to_string());
       None
+    } else {
+      None
+    };
+    let (skill_root, project_root) = if cfg!(debug_assertions) {
+      let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri must have a parent")
+        .to_path_buf();
+      (root.join("skills"), root)
+    } else {
+      let resource_root = app.path().resource_dir().map_err(|_| "找不到应用资源目录。".to_string())?;
+      let data_root = app.path().app_data_dir().map_err(|_| "无法访问应用数据目录。".to_string())?;
+      fs::create_dir_all(&data_root).map_err(|_| "无法创建应用数据目录。".to_string())?;
+      (resource_root.join("skills"), data_root)
     };
     let body = serde_json::to_string(&request).map_err(|_| "无法编码自动化请求。".to_string())?;
     let mut command = Command::new(runtime);
     hide_console_window(&mut command);
     command
       .arg(&script)
-      .arg(body)
-      .stdin(Stdio::null())
+      .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped());
     if let Some(payload) = hub_payload {
       command.env("AI_BROWSER_HUB_PAYLOAD", payload);
     }
+    command
+      .env("VIDEO_REVERSE_PROMPT_SKILL_ROOT", skill_root)
+      .env("VIDEO_REVERSE_PROMPT_PROJECT_ROOT", project_root);
     let mut child = command
       .spawn()
-      .map_err(|_| "无法启动内置 Gemini HTTP 服务。".to_string())?;
+      .map_err(|_| "无法启动视频分析与提示词生成服务。".to_string())?;
+
+    let mut child_stdin = child.stdin.take().ok_or_else(|| "无法写入自动化请求。".to_string())?;
+    child_stdin.write_all(body.as_bytes()).map_err(|_| "无法写入自动化请求。".to_string())?;
+    drop(child_stdin);
 
     let stdout = child.stdout.take().ok_or_else(|| "无法读取自动化服务输出。".to_string())?;
     let mut result: Option<Value> = None;

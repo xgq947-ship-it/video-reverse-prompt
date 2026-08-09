@@ -1,16 +1,7 @@
 export type MediaType = 'video'
 export type VideoMode = '完整反推' | '动作优先' | '运镜优先' | '分镜优先'
 export type AnalysisMode = VideoMode
-
-export interface AnalysisOptions {
-  detectDialogue: boolean
-  generateCharacterPrompts: boolean
-}
-
-export const DEFAULT_ANALYSIS_OPTIONS: AnalysisOptions = {
-  detectDialogue: false,
-  generateCharacterPrompts: false,
-}
+export type GenerationProvider = 'deepseek' | 'codex_cli'
 
 export interface MediaSource {
   kind: 'link'
@@ -34,10 +25,17 @@ export interface MediaFile {
   source?: MediaSource
 }
 
-export type AnalysisStage = 'idle' | 'resolving' | 'downloading' | 'preparing' | 'opening' | 'uploading' | 'processing' | 'sending' | 'analyzing' | 'extracting' | 'completed' | 'error'
+export type AnalysisStage = 'idle' | 'resolving' | 'downloading' | 'preparing' | 'opening' | 'uploading' | 'processing' | 'sending' | 'analyzing' | 'extracting' | 'writing-script' | 'creating-characters' | 'planning-shots' | 'generating-shots' | 'completed' | 'error'
 
 export interface AnalysisResult {
   kind: MediaType
+  sections: Record<string, string>
+  json: unknown | null
+  rawResponse: string
+  parseWarning?: string
+}
+
+export interface ProductionResult {
   sections: Record<string, string>
   json: unknown | null
   rawResponse: string
@@ -51,8 +49,8 @@ export interface HistoryItem {
   filename: string
   filepath: string
   mode: AnalysisMode
-  options: AnalysisOptions
   result: AnalysisResult
+  productionResult?: ProductionResult
   source?: MediaSource
 }
 
@@ -60,6 +58,8 @@ export interface Settings {
   geminiUrl: string
   browserBehavior: 'show' | 'background' | 'minimize'
   defaultVideoMode: VideoMode
+  generationProvider: GenerationProvider
+  deepseekApiKey: string
   saveHistory: boolean
   maxHistory: number
   debug: boolean
@@ -71,6 +71,8 @@ export const DEFAULT_SETTINGS: Settings = {
   geminiUrl: 'https://gemini.google.com/app',
   browserBehavior: 'background',
   defaultVideoMode: '完整反推',
+  generationProvider: 'deepseek',
+  deepseekApiKey: '',
   saveHistory: true,
   maxHistory: 100,
   debug: false,

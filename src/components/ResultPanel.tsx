@@ -1,56 +1,97 @@
-import { Check, Copy, LoaderCircle, RotateCcw, Sparkles, Users, MessageSquareText } from 'lucide-react'
+import { Check, Copy, FileVideo2, LoaderCircle, RotateCcw, Settings2, Sparkles, WandSparkles } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { plannedShotCount } from '../prompts/videoPrompt'
-import type { AnalysisMode, AnalysisOptions, AnalysisResult, AnalysisStage } from '../types'
+import type { AnalysisMode, AnalysisResult, AnalysisStage, ProductionResult } from '../types'
 
 const VIDEO_MODES: AnalysisMode[] = ['完整反推', '动作优先', '运镜优先', '分镜优先']
-const VIDEO_TABS: [string, string][] = [
+const REVERSE_TABS: [string, string][] = [
   ['总览', 'VIDEO_OVERVIEW'],
-  ['反推提示词', 'REVERSE_PROMPT'],
-  ['剧本', 'SCRIPT'],
-  ['角色提示词', 'CHARACTER_PROMPTS'],
-  ['成片提示词', 'SHOT_PROMPTS'],
+  ['时间线', 'TIMELINE'],
+  ['动作', 'MOTION_PROMPT'],
+  ['镜头', 'CAMERA_PROMPT'],
+  ['Kling', 'KLING'],
+  ['Seedance', 'SEEDANCE'],
+  ['Veo', 'VEO'],
+  ['Runway', 'RUNWAY'],
   ['JSON', 'JSON'],
   ['原文', 'RAW'],
+]
+const PRODUCTION_TABS: [string, string][] = [
+  ['短视频剧本', 'SCRIPT'],
+  ['角色提示词', 'CHARACTER_PROMPTS'],
+  ['多分镜提示词', 'SHOT_PROMPTS'],
+  ['生成包 JSON', 'JSON'],
+  ['生成原文', 'RAW'],
 ]
 
 interface Props {
   mode: AnalysisMode
   onMode: (value: AnalysisMode) => void
-  options: AnalysisOptions
-  onOptions: (value: AnalysisOptions) => void
   duration?: number
   stage: AnalysisStage
   status: string
   result: AnalysisResult | null
   error: string
   onAnalyze: (modifier?: string) => void
+  productionResult: ProductionResult | null
+  productionStage: AnalysisStage
+  productionStatus: string
+  productionError: string
+  onGenerateProduction: () => void
+  generationLabel: string
+  onOpenGenerationSettings: () => void
 }
 
-export function ResultPanel({ mode, onMode, options, onOptions, duration, stage, status, result, error, onAnalyze }: Props) {
-  const [active, setActive] = useState(result?.parseWarning ? 'RAW' : VIDEO_TABS[0][1])
+function resultContent(result: AnalysisResult | ProductionResult | null, key: string): string {
+  if (!result) return ''
+  if (key === 'RAW') return result.rawResponse
+  if (key === 'JSON') return result.json ? JSON.stringify(result.json, null, 2) : result.sections.JSON ?? ''
+  return result.sections[key] ?? ''
+}
+
+export function ResultPanel({
+  mode,
+  onMode,
+  duration,
+  stage,
+  status,
+  result,
+  error,
+  onAnalyze,
+  productionResult,
+  productionStage,
+  productionStatus,
+  productionError,
+  onGenerateProduction,
+  generationLabel,
+  onOpenGenerationSettings,
+}: Props) {
+  const [phase, setPhase] = useState<'reverse' | 'production'>('reverse')
+  const [active, setActive] = useState(REVERSE_TABS[0][1])
   const [copied, setCopied] = useState(false)
-  const busy = !['idle', 'completed', 'error'].includes(stage)
-  const shotCount = plannedShotCount(duration)
-  const content = useMemo(() => {
-    if (!result) return ''
-    if (active === 'RAW') return result.rawResponse
-    if (active === 'JSON') return result.json ? JSON.stringify(result.json, null, 2) : result.sections.JSON ?? ''
-    return result.sections[active] ?? ''
-  }, [active, result])
+  const analysisBusy = !['idle', 'completed', 'error'].includes(stage)
+  const productionBusy = !['idle', 'completed', 'error'].includes(productionStage)
+  const busy = analysisBusy || productionBusy
+  const shotCount = duration ? Math.max(1, Math.min(18, Math.ceil(duration / 10))) : null
+  const selectedResult = phase === 'production' ? productionResult : result
+  const content = useMemo(() => resultContent(selectedResult, active), [active, selectedResult])
 
   useEffect(() => {
     if (!result) {
-      setActive(VIDEO_TABS[0][1])
-      return
+      setPhase('reverse')
+      setActive(REVERSE_TABS[0][1])
     }
-    const firstAvailable = VIDEO_TABS.find(([, key]) => {
-      if (key === 'RAW') return false
-      if (key === 'JSON') return Boolean(result.json || result.sections.JSON)
-      return Boolean(result.sections[key])
-    })
-    setActive(firstAvailable?.[1] ?? 'RAW')
   }, [result])
+
+  useEffect(() => {
+    if (!productionResult) return
+    setPhase('production')
+    setActive('SHOT_PROMPTS')
+  }, [productionResult])
+
+  const selectTab = (nextPhase: 'reverse' | 'production', key: string) => {
+    setPhase(nextPhase)
+    setActive(key)
+  }
 
   const copy = async () => {
     if (!content) return
@@ -74,22 +115,37 @@ export function ResultPanel({ mode, onMode, options, onOptions, duration, stage,
   return (
     <section className="result-panel panel">
       <div className="result-controls">
-        <label>分析模式<select value={mode} onChange={(event) => onMode(event.target.value as AnalysisMode)} disabled={busy}>{VIDEO_MODES.map((item) => <option key={item}>{item}</option>)}</select></label>
-        <div className="duration-plan"><span>原片时长</span><strong>{duration ? `${duration.toFixed(1)} 秒 · ${shotCount} 镜头` : '由视频读取'}</strong></div>
-        <button className="primary-button" onClick={() => onAnalyze()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : result ? <RotateCcw size={16} /> : <Sparkles size={16} />}{busy ? status : result ? '重新生成' : '开始反推'}</button>
+        <label>Gemini 反推模式<select value={mode} onChange={(event) => onMode(event.target.value as AnalysisMode)} disabled={busy}>{VIDEO_MODES.map((item) => <option key={item}>{item}</option>)}</select></label>
+        <div className="duration-plan"><span>原片时长</span><strong>{duration ? `${duration.toFixed(1)} 秒${shotCount ? ` · 约 ${shotCount} 镜头` : ''}` : '由视频读取'}</strong></div>
+        <button className="primary-button" onClick={() => onAnalyze()} disabled={busy}>{analysisBusy ? <LoaderCircle className="spin" size={16} /> : result ? <RotateCcw size={16} /> : <Sparkles size={16} />}{analysisBusy ? status : result ? '重新反推' : '开始反推'}</button>
       </div>
-      <div className="pipeline-options" aria-label="生成选项">
-        <label className={options.detectDialogue ? 'active' : ''}><input type="checkbox" checked={options.detectDialogue} onChange={(event) => onOptions({ ...options, detectDialogue: event.target.checked })} disabled={busy} /><MessageSquareText size={15} /><span><strong>识别角色对白</strong><small>开启后生成含逐字台词的剧本</small></span></label>
-        <label className={options.generateCharacterPrompts ? 'active' : ''}><input type="checkbox" checked={options.generateCharacterPrompts} onChange={(event) => onOptions({ ...options, generateCharacterPrompts: event.target.checked })} disabled={busy} /><Users size={15} /><span><strong>生成角色提示词</strong><small>可选角色参考图与表演主档案</small></span></label>
-      </div>
+
       {error && <div className="error-box">{error}</div>}
-      {!result && !error && <div className="empty-result"><Sparkles size={28} strokeWidth={1.35} /><h3>{busy ? status : '准备生成视频提示词包'}</h3><p>{busy ? '正在分析原片并按时长拆分镜头，请勿关闭 Gemini 浏览器窗口' : '设置对白与角色选项后开始反推，生成剧本和可直接复制的逐镜头提示词。'}</p>{busy && <div className="progress-track"><span /></div>}</div>}
+      {!result && !error && <div className="empty-result"><FileVideo2 size={30} strokeWidth={1.3} /><h3>{analysisBusy ? status : '第一步：Gemini 视频反推'}</h3><p>{analysisBusy ? '正在按 Reverse Prompt 原版流程分析原片，请勿关闭 Gemini 登录窗口。' : '先生成原版时间线、动作、运镜和各视频模型提示词；完成后再生成短视频剧本。'}</p>{analysisBusy && <div className="progress-track"><span /></div>}</div>}
+
       {result && <div className="result-body">
-        {result.parseWarning && <div className="warning-box">{result.parseWarning}</div>}
-        <div className="tabs">{VIDEO_TABS.map(([label, key]) => <button className={active === key ? 'active' : ''} key={key} onClick={() => setActive(key)}>{label}</button>)}</div>
-        <div className="result-copy"><button className="quiet-button" onClick={copy}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? '已复制' : active === 'SHOT_PROMPTS' ? '复制全部镜头' : '复制'}</button></div>
-        <pre className="result-text">{content || '此部分没有可显示的内容，请查看原文。'}</pre>
-        <div className="refine-actions"><button disabled={busy} onClick={() => onAnalyze('逐项检查并补强所有动作、身体重心、视线、手部、道具和物理细节，不得缩短任何已有有效提示词。')}>强化动作</button><button disabled={busy} onClick={() => onAnalyze('逐项检查并补强机位、景别、空间距离、单一运镜、焦点和光线逻辑，不得缩短任何已有有效提示词。')}>强化镜头</button>{options.detectDialogue && <button disabled={busy} onClick={() => onAnalyze('重新核对视频音轨与口型，只保留真正可辨认的逐字对白，校正说话人、时间码、声线和口型同步，绝不猜测。')}>校准对白</button>}<button disabled={busy} onClick={() => onAnalyze('重新核对总时长、镜头数与每条时间码，确保连续无空隙、无重叠、单镜头不超过 10 秒，并完整输出六个分区。')}>校准时长</button></div>
+        <div className="pipeline-status">
+          <button className={phase === 'reverse' ? 'active done' : 'done'} onClick={() => selectTab('reverse', 'VIDEO_OVERVIEW')}><b>1</b><span>Gemini 视频反推<small>已完成</small></span></button>
+          <i />
+          <button className={phase === 'production' ? 'active' : ''} disabled={!productionResult} onClick={() => productionResult && selectTab('production', 'SHOT_PROMPTS')}><b>2</b><span>剧本 · 角色 · 多分镜<small>{productionBusy ? productionStatus : productionResult ? '已完成' : '等待生成'}</small></span></button>
+        </div>
+
+        {!productionResult && <div className="production-callout">
+          <div><WandSparkles size={19} /><span><strong>第二步：生成短视频剧本</strong><small>使用完整 HotStory 模板与 3 份 Skill 原文，生成角色和可直接复制的多分镜提示词。</small></span></div>
+          <div className="production-actions"><button className="model-link" onClick={onOpenGenerationSettings} disabled={productionBusy}><Settings2 size={13} />{generationLabel}</button><button className="production-button" onClick={onGenerateProduction} disabled={busy}>{productionBusy ? <LoaderCircle className="spin" size={15} /> : <WandSparkles size={15} />}{productionBusy ? productionStatus : '生成短视频剧本'}</button></div>
+          {productionBusy && <div className="production-progress"><span /></div>}
+          {productionError && <div className="inline-generation-error">{productionError}</div>}
+        </div>}
+
+        {(phase === 'reverse' || productionResult) && <>
+          {(phase === 'reverse' ? result.parseWarning : productionResult?.parseWarning) && <div className="warning-box">{phase === 'reverse' ? result.parseWarning : productionResult?.parseWarning}</div>}
+          <div className="tabs">
+            {(phase === 'reverse' ? REVERSE_TABS : PRODUCTION_TABS).map(([label, key]) => <button className={active === key ? 'active' : ''} key={`${phase}-${key}`} onClick={() => selectTab(phase, key)}>{label}</button>)}
+          </div>
+          <div className="result-copy"><button className="quiet-button" onClick={copy}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? '已复制' : active === 'SHOT_PROMPTS' ? '复制全部分镜' : '复制'}</button></div>
+          <pre className="result-text">{content || '此部分没有可显示的内容，请查看原文。'}</pre>
+          {phase === 'reverse' ? <div className="refine-actions"><button disabled={busy} onClick={() => onAnalyze('逐项检查并补强所有动作、身体重心、视线、手部、道具和物理细节，不得缩短任何已有有效提示词。')}>强化动作</button><button disabled={busy} onClick={() => onAnalyze('逐项检查并补强机位、景别、空间距离、单一运镜、焦点和光线逻辑，不得缩短任何已有有效提示词。')}>强化镜头</button><button disabled={busy} onClick={() => onAnalyze('重新核对总时长、全部 Shot 与每条时间码，确保时间线连续并完整输出原版九个分区。')}>校准时间线</button></div> : <div className="refine-actions production-footer"><span>{generationLabel} · HotStory 原始模板 / Skill 原文</span><button disabled={busy} onClick={onGenerateProduction}><RotateCcw size={12} />重新生成剧本分镜</button></div>}
+        </>}
       </div>}
     </section>
   )

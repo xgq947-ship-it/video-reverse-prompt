@@ -12,3 +12,8 @@ const { DEFAULT_SETTINGS } = await import(`data:text/javascript;base64,${Buffer.
 test('浏览器默认在后台执行', () => {
   assert.equal(DEFAULT_SETTINGS.browserBehavior, 'background')
 })
+
+test('第二步默认 DeepSeek V4 Flash MAX 且只需填写 Key', () => {
+  assert.equal(DEFAULT_SETTINGS.generationProvider, 'deepseek')
+  assert.equal(DEFAULT_SETTINGS.deepseekApiKey, '')
+})
