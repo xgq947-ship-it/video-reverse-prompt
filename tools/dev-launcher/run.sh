@@ -9,7 +9,8 @@ PID_FILE="${PROJECT_DIR}/logs/video-reverse-prompt-dev.pid"
 
 USER_HOME="$(/usr/bin/dscl . -read "/Users/$(/usr/bin/id -un)" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
 export HOME="${USER_HOME}"
-export PATH="/usr/local/bin:/opt/homebrew/bin:${USER_HOME}/.cargo/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+# Keep the detached process on the same toolchain PATH used by control.sh.
+export PATH="${USER_HOME}/.local/bin:${USER_HOME}/.hermes/node/bin:${USER_HOME}/.volta/bin:${USER_HOME}/.asdf/shims:${USER_HOME}/.fnm/aliases/default/bin:/opt/homebrew/bin:/usr/local/bin:${USER_HOME}/.cargo/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
 
 /bin/mkdir -p "${PROJECT_DIR}/logs"
 print -r -- "$$" > "${PID_FILE}"
