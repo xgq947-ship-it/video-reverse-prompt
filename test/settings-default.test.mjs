@@ -6,6 +6,7 @@ import ts from 'typescript'
 const source = await readFile(new URL('../src/types/index.ts', import.meta.url), 'utf8')
 const settingsViewSource = await readFile(new URL('../src/components/SettingsView.tsx', import.meta.url), 'utf8')
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8')
+const resultPanelSource = await readFile(new URL('../src/components/ResultPanel.tsx', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 }).outputText
@@ -30,4 +31,12 @@ test('生成模型作为草稿选择，必须验证并保存后才生效', () =>
 test('设置加载前不会用默认值自动覆盖本机配置', () => {
   assert.match(appSource, /const applySettings = useCallback/)
   assert.doesNotMatch(appSource, /useEffect\(\(\) => \{ void saveSettings\(settings\) \}/)
+})
+
+test('第二步提供 10 秒组合、原片分镜与可选双主角标签', () => {
+  assert.match(resultPanelSource, /每 10 秒一段/)
+  assert.match(resultPanelSource, /沿用原片分镜/)
+  assert.match(resultPanelSource, /主角标签（可选）/)
+  assert.match(appSource, /storyboardMode/)
+  assert.match(appSource, /protagonistTags/)
 })

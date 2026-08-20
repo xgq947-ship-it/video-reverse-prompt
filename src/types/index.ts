@@ -2,6 +2,7 @@ export type MediaType = 'video'
 export type VideoMode = '完整反推' | '动作优先' | '运镜优先' | '分镜优先'
 export type AnalysisMode = VideoMode
 export type GenerationProvider = 'deepseek' | 'codex_cli'
+export type StoryboardMode = 'ten_second_groups' | 'source_shots'
 
 export interface MediaSource {
   kind: 'link'

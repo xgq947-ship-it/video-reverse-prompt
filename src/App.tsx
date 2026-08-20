@@ -14,7 +14,7 @@ import { ResultPanel } from './components/ResultPanel'
 import { SettingsView } from './components/SettingsView'
 import { buildVideoPrompt } from './prompts/videoPrompt'
 import { loadHistory, loadSettings, saveHistory, saveSettings } from './storage/store'
-import type { AnalysisMode, AnalysisResult, AnalysisStage, HistoryItem, MediaFile, MediaSource, ProductionResult, Settings } from './types'
+import type { AnalysisMode, AnalysisResult, AnalysisStage, HistoryItem, MediaFile, MediaSource, ProductionResult, Settings, StoryboardMode } from './types'
 import { DEFAULT_SETTINGS } from './types'
 
 interface ImportedVideoPayload {
@@ -110,6 +110,8 @@ function App() {
   const [resolvingLink, setResolvingLink] = useState(false)
   const [linkError, setLinkError] = useState('')
   const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null)
+  const [storyboardMode, setStoryboardMode] = useState<StoryboardMode>('ten_second_groups')
+  const [protagonistTags, setProtagonistTags] = useState<[string, string]>(['', ''])
 
   useEffect(() => {
     void Promise.all([loadSettings(), loadHistory()]).then(async ([loadedSettings, loadedHistory]) => {
@@ -335,6 +337,8 @@ function App() {
           reverseResponse: result.rawResponse,
           duration: file.duration,
           filename: file.source?.title || file.name,
+          storyboardMode,
+          protagonistTags: protagonistTags.map((tag) => tag.trim()).filter(Boolean),
           generator: {
             provider: settings.generationProvider,
             deepseekApiKey: settings.generationProvider === 'deepseek' ? settings.deepseekApiKey : undefined,
@@ -377,7 +381,7 @@ function App() {
       setProductionStage('error')
       setProductionStatus('生成失败')
     }
-  }, [activeHistoryId, file, history, mode, result, settings])
+  }, [activeHistoryId, file, history, mode, protagonistTags, result, settings, storyboardMode])
 
   const runSimple = async (command: 'open' | 'check-login' | 'compatibility') => {
     if (!isTauri) return
@@ -412,6 +416,13 @@ function App() {
     setProductionResult(item.productionResult ?? null)
     setProductionStage(item.productionResult ? 'completed' : 'idle')
     setProductionStatus(item.productionResult ? '剧本、角色与多分镜提示词已完成' : '')
+    const productionJson = item.productionResult?.json
+    if (productionJson && typeof productionJson === 'object' && !Array.isArray(productionJson)) {
+      const record = productionJson as Record<string, unknown>
+      setStoryboardMode(record.storyboard_mode === 'source_shots' ? 'source_shots' : 'ten_second_groups')
+      const tags = Array.isArray(record.protagonist_tags) ? record.protagonist_tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 2) : []
+      setProtagonistTags([tags[0]?.replace(/^@/, '') ?? '', tags[1]?.replace(/^@/, '') ?? ''])
+    }
     setActiveHistoryId(item.id)
   }
   const deleteHistoryItem = async (id: string) => {
@@ -458,7 +469,7 @@ function App() {
   return <div className="app-shell">
     <header className="titlebar" data-tauri-drag-region><div className="brand"><div className="brand-mark"><Clapperboard size={16} /></div><div><strong>{view === 'settings' ? 'Video Reverse Prompt 设置' : 'Video Reverse Prompt'}</strong>{view !== 'settings' && <span>GEMINI REVERSE → HOTSTORY PRODUCTION</span>}</div></div><nav><button onClick={() => setView('history')} className={view === 'history' ? 'active' : ''}><Clock3 size={15} />历史记录</button><button onClick={() => { setSettingsPage('about'); setView('settings') }} className={view === 'settings' ? 'active' : ''}><SettingsIcon size={15} />设置</button></nav></header>
     <main className={view === 'settings' ? 'settings-main' : ''}>
-      {view === 'main' && (!file ? <div className="home"><div className="hero-copy"><span className="eyebrow">GEMINI VIDEO REVERSE · HOTSTORY PIPELINE</span><h1>先反推原片，<br />再生成整套分镜。</h1><p>第一步沿用 Reverse Prompt 原版 Gemini 视频分析；完成后再用 DeepSeek 或 Codex CLI 生成短视频剧本、角色参考图提示词和可直接复制的多分镜视频提示词。</p><div className="hero-steps"><span><b>01</b>导入原片</span><i /><span><b>02</b>Gemini 反推</span><i /><span><b>03</b>生成剧本分镜</span></div></div><DropZone dragging={dragging} onPick={pickFile} sourceMode={sourceMode} onSourceMode={(next) => { setSourceMode(next); setLinkError('') }} videoUrl={videoUrl} onVideoUrl={(value) => { setVideoUrl(value); if (linkError) setLinkError('') }} onResolve={() => void resolveVideoLink()} resolving={resolvingLink} status={status} error={linkError} /></div> : <div className="workspace"><MediaPreview file={file} previewUrl={previewUrl} onClear={() => { setFile(null); setResult(null); setProductionResult(null); setError(''); setProductionError(''); setStage('idle'); setProductionStage('idle'); setStatus(''); setActiveHistoryId(null) }} onMetadata={(width, height, duration) => setFile((current) => current ? { ...current, width, height, duration } : current)} /><ResultPanel mode={mode} onMode={setMode} duration={file.duration} stage={stage} status={status} result={result} error={error} onAnalyze={analyze} productionResult={productionResult} productionStage={productionStage} productionStatus={productionStatus} productionError={productionError} onGenerateProduction={() => void generateProduction()} generationLabel={settings.generationProvider === 'deepseek' ? 'DeepSeek V4 Flash MAX' : 'Codex CLI'} onOpenGenerationSettings={() => { setSettingsPage('generator'); setView('settings') }} /></div>)}
+      {view === 'main' && (!file ? <div className="home"><div className="hero-copy"><span className="eyebrow">GEMINI VIDEO REVERSE · HOTSTORY PIPELINE</span><h1>先反推原片，<br />再生成整套分镜。</h1><p>第一步沿用 Reverse Prompt 原版 Gemini 视频分析；完成后再用 DeepSeek 或 Codex CLI 生成短视频剧本、角色参考图提示词和可直接复制的多分镜视频提示词。</p><div className="hero-steps"><span><b>01</b>导入原片</span><i /><span><b>02</b>Gemini 反推</span><i /><span><b>03</b>生成剧本分镜</span></div></div><DropZone dragging={dragging} onPick={pickFile} sourceMode={sourceMode} onSourceMode={(next) => { setSourceMode(next); setLinkError('') }} videoUrl={videoUrl} onVideoUrl={(value) => { setVideoUrl(value); if (linkError) setLinkError('') }} onResolve={() => void resolveVideoLink()} resolving={resolvingLink} status={status} error={linkError} /></div> : <div className="workspace"><MediaPreview file={file} previewUrl={previewUrl} onClear={() => { setFile(null); setResult(null); setProductionResult(null); setError(''); setProductionError(''); setStage('idle'); setProductionStage('idle'); setStatus(''); setActiveHistoryId(null) }} onMetadata={(width, height, duration) => setFile((current) => current ? { ...current, width, height, duration } : current)} /><ResultPanel mode={mode} onMode={setMode} duration={file.duration} stage={stage} status={status} result={result} error={error} onAnalyze={analyze} productionResult={productionResult} productionStage={productionStage} productionStatus={productionStatus} productionError={productionError} storyboardMode={storyboardMode} onStoryboardMode={setStoryboardMode} protagonistTags={protagonistTags} onProtagonistTags={setProtagonistTags} onGenerateProduction={() => void generateProduction()} generationLabel={settings.generationProvider === 'deepseek' ? 'DeepSeek V4 Flash MAX' : 'Codex CLI'} onOpenGenerationSettings={() => { setSettingsPage('generator'); setView('settings') }} /></div>)}
       {view === 'history' && <div className="subpage"><div className="subpage-header"><div><span>VIDEO PACKAGES</span><h1>历史记录</h1></div><button className="icon-button" onClick={() => setView('main')}><X size={18} /></button></div><HistoryView items={history} onOpen={openHistoryItem} onDelete={deleteHistoryItem} onReanalyze={(item) => { void openHistoryItem(item) }} /></div>}
       {view === 'settings' && <div className="settings-subpage"><button className="settings-close icon-button" onClick={() => setView('main')} title="关闭设置"><X size={18} /></button><SettingsView settings={settings} onChange={applySettings} connection={connection} onOpenGemini={() => void runSimple('open')} onCheck={() => void runSimple('check-login')} onCompatibility={() => void runSimple('compatibility')} checks={checks} onClearHistory={clearHistory} initialPage={settingsPage} /></div>}
     </main>

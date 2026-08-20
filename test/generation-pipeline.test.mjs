@@ -7,6 +7,10 @@ class FakeProvider {
   model = 'deepseek-v4-flash'
   calls = []
 
+  constructor({ leadCount = 1 } = {}) {
+    this.leadCount = leadCount
+  }
+
   async generateText(systemPrompt, userPrompt) {
     this.calls.push({ type: 'text', systemPrompt, userPrompt })
     return {
@@ -26,8 +30,8 @@ class FakeProvider {
       assert.ok(userPrompt.length > 25_000)
       value = {
         style_bible: '真实自然电影质感，统一柔和侧光、自然肤质、真实布料与稳定的中性色彩关系。',
-        characters: [{
-          prompt_label: '年轻女性',
+        characters: Array.from({ length: this.leadCount }, (_, index) => ({
+          prompt_label: index === 0 ? '年轻女性' : '年轻男性',
           role: 'lead',
           story_function: '承接原视频中的主要动作与情绪变化',
           source_fact_ids: [factId],
@@ -37,7 +41,7 @@ class FakeProvider {
           acting_profile: '她的重心略低，肩背保持克制，目标是确认门外的动静。压力升高时拇指轻触食指，眼睛先于头部到达门口，眨眼和呼吸保持自然；走路以短而稳定的全脚掌落地为固定步态，听见声音时手中动作短暂停住。',
           voice_prompt: '年轻女性的自然中音，语速克制，气息稳定。',
           default_use_reference: true,
-        }],
+        })),
       }
     } else if (systemPrompt.includes('分镜规划师')) {
       value = {
@@ -49,7 +53,7 @@ class FakeProvider {
           narration: index ? '第二句旁白。' : '第一句旁白。',
           dialogue: '',
           visual_brief: index ? '年轻女性从窗边走向门口并停下' : '年轻女性站在窗边抬头观察',
-          active_character_ids: ['char_01'],
+          active_character_ids: Array.from({ length: this.leadCount }, (_, characterIndex) => `char_${String(characterIndex + 1).padStart(2, '0')}`),
           event_ids: [eventIds[index] ?? eventIds[0]],
           source_ids: [sourceId],
         })),
@@ -90,8 +94,14 @@ test('第二步按 HotStory 原流程生成剧本、角色和多个可复制分�
   assert.equal(result.package.characters.length, 1)
   assert.equal(result.package.shots.length, 2)
   assert.equal(result.package.shots[0].start_second, 0)
+  assert.equal(result.package.shots[0].end_second, 10)
+  assert.equal(result.package.shots[1].start_second, 10)
   assert.equal(result.package.shots[1].end_second, 12)
   assert.ok(result.package.shots.every((shot) => shot.duration_seconds <= 10))
+  assert.equal(result.package.storyboard_mode, 'ten_second_groups')
+  assert.deepEqual(result.package.shots[0].source_shot_ids, ['source_shot_01', 'source_shot_02'])
+  assert.deepEqual(result.package.shots[0].internal_cut_times, [6])
+  assert.equal(result.package.shots[0].contains_multiple_source_shots, true)
   assert.match(result.package.shots[0].prompt_body_template, /旁白逐字："第一句旁白。"/)
   assert.match(result.package.shots[0].prompt_body_template, /除上述内容外无额外人声，无字幕。/)
   assert.deepEqual(result.package.skills.map((skill) => skill.instruction_mode), ['verbatim', 'verbatim', 'verbatim'])
@@ -100,4 +110,45 @@ test('第二步按 HotStory 原流程生成剧本、角色和多个可复制分�
   assert.ok(stages.includes('planning-shots'))
   assert.ok(stages.includes('generating-shots'))
   assert.equal(provider.calls.length, 4)
+})
+
+test('可沿用原视频剪辑点与原分镜时长生成', async () => {
+  const provider = new FakeProvider()
+  const reverseResponse = `---VIDEO_OVERVIEW---\n12 秒室内人物短片。\n---TIMELINE---\n0-6 秒窗边，6-12 秒走向门口。\n---MOTION_PROMPT---\n人物抬头后走向门口。\n---CAMERA_PROMPT---\n缓慢推进。\n---KLING---\nKling。\n---SEEDANCE---\nSeedance。\n---VEO---\nVeo。\n---RUNWAY---\nRunway。\n---JSON---\n{"duration":12,"shots":[{"start":"00:00","end":"00:06","subject":"年轻女性","action":"窗边抬头"},{"start":"00:06","end":"00:12","subject":"年轻女性","action":"走向门口"}]}`
+  const result = await generateProductionPackage({
+    reverseResponse,
+    duration: 12,
+    filename: 'reference.mp4',
+    storyboardMode: 'source_shots',
+    provider,
+  })
+  assert.equal(result.package.storyboard_mode, 'source_shots')
+  assert.deepEqual(result.package.shots.map((shot) => [shot.start_second, shot.end_second]), [[0, 6], [6, 12]])
+  assert.deepEqual(result.package.shots.map((shot) => shot.source_shot_ids), [['source_shot_01'], ['source_shot_02']])
+  assert.ok(result.package.shots.every((shot) => shot.contains_multiple_source_shots === false))
+  assert.match(provider.calls[0].userPrompt, /不合并、不拆分、不改写镜头/)
+})
+
+test('用户主角标签替换自动人物占位符且不输出 AI 外貌描述', async () => {
+  const provider = new FakeProvider({ leadCount: 2 })
+  const reverseResponse = `---VIDEO_OVERVIEW---\n12 秒室内人物短片。\n---TIMELINE---\n0-6 秒窗边，6-12 秒走向门口。\n---MOTION_PROMPT---\n人物抬头后走向门口。\n---CAMERA_PROMPT---\n缓慢推进。\n---KLING---\nKling。\n---SEEDANCE---\nSeedance。\n---VEO---\nVeo。\n---RUNWAY---\nRunway。\n---JSON---\n{"duration":12,"shots":[{"start":0,"end":6,"subject":"年轻女性","action":"窗边抬头"},{"start":6,"end":12,"subject":"年轻女性","action":"走向门口"}]}`
+  const result = await generateProductionPackage({
+    reverseResponse,
+    duration: 12,
+    filename: 'reference.mp4',
+    protagonistTags: ['@小夏', '阿川'],
+    provider,
+  })
+  assert.deepEqual(result.package.protagonist_tags, ['@小夏', '@阿川'])
+  assert.equal(result.package.characters[0].prompt_reference, '@小夏')
+  assert.equal(result.package.characters[1].prompt_reference, '@阿川')
+  assert.equal(result.package.characters[0].identity_basis, 'user_protagonist_tag')
+  assert.equal(result.package.characters[0].image_prompt, '')
+  assert.match(result.package.shots[0].prompt_body_template, /@小夏/)
+  assert.match(result.package.shots[0].prompt_body_template, /@阿川/)
+  assert.doesNotMatch(result.package.shots[0].prompt_body_template, /\[\[CHAR_01\]\]/)
+  assert.match(result.rawResponse, /直接使用该标签人物，不生成或覆盖人物外貌/)
+  const cinematicCall = provider.calls.find((call) => call.systemPrompt.includes('CINEDANCE'))
+  assert.match(cinematicCall.userPrompt, /不得补写、猜测或覆盖其外貌/)
+  assert.doesNotMatch(cinematicCall.userPrompt, /二十多岁的年轻女性，自然真实体型/)
 })

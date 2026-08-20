@@ -29,7 +29,7 @@ import type { Settings } from '../types'
 const REPOSITORY_URL = 'https://github.com/xgq947-ship-it/video-reverse-prompt'
 const RELEASES_API = 'https://api.github.com/repos/xgq947-ship-it/video-reverse-prompt/releases'
 const WECHAT_ID = 'Moment_oo7'
-const FALLBACK_VERSION = '0.1.0'
+const FALLBACK_VERSION = '0.2.0'
 const isTauri = '__TAURI_INTERNALS__' in window
 
 type SettingsPage = 'generator' | 'advanced' | 'about' | 'updates' | 'support'
@@ -78,9 +78,9 @@ interface Props {
 
 const LOCAL_RELEASES: ReleaseInfo[] = [
   {
-    tag_name: 'v0.1.0',
-    name: 'Video Reverse Prompt v0.1.0',
-    html_url: `${REPOSITORY_URL}/releases/tag/v0.1.0`,
+    tag_name: 'v0.2.0',
+    name: 'Video Reverse Prompt v0.2.0',
+    html_url: `${REPOSITORY_URL}/releases/tag/v0.2.0`,
     published_at: '2026-08-09T00:00:00Z',
     draft: false,
     prerelease: false,

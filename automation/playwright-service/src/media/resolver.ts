@@ -1,8 +1,11 @@
 const DEFAULT_RESOLVER_ORIGIN = 'https://dyxhsdownloader.com'
+const BUGPK_DOUYIN_API_ORIGIN = 'https://api.bugpk.com/api/douyin'
 const XHUS_DOUYIN_API_ORIGIN = 'https://api.xhus.cn/api/douyin'
 const TIKWM_API_ORIGIN = 'https://www.tikwm.com/api/'
 const FXTWITTER_API_ORIGIN = 'https://api.fxtwitter.com/2/status'
 const DEFAULT_TIMEOUT_MS = 30_000
+const BUGPK_ATTEMPT_TIMEOUT_MS = 10_000
+const BUGPK_RETRY_DELAYS_MS = [250, 750]
 const MAX_DOUYIN_PAGE_LENGTH = 5 * 1024 * 1024
 const MAX_DOUYIN_REDIRECTS = 5
 const DIRECT_VIDEO_EXTENSION_RE = /\.(?:mp4|mov|m4v|webm)(?:$|[?#])/i
@@ -91,6 +94,32 @@ function createTimeoutSignal(timeoutMs: number) {
   const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeoutMs)
   timer.unref?.()
   return { signal: controller.signal, clear: () => clearTimeout(timer) }
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+function retryablePublicResolverError(error: unknown): boolean {
+  return error instanceof MediaResolverError && [
+    'MEDIA_RESOLVER_UNAVAILABLE',
+    'MEDIA_RESOLVER_HTTP_ERROR',
+    'MEDIA_RESOLVER_RATE_LIMITED',
+  ].includes(error.code)
+}
+
+async function withPublicResolverRetry<T>(operation: () => Promise<T>): Promise<T> {
+  let lastError: unknown
+  for (let attempt = 0; attempt <= BUGPK_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (!retryablePublicResolverError(error) || attempt === BUGPK_RETRY_DELAYS_MS.length) throw error
+      await wait(BUGPK_RETRY_DELAYS_MS[attempt])
+    }
+  }
+  throw lastError
 }
 
 async function readJsonResponse(response: Response, endpointName: string): Promise<JsonRecord> {
@@ -333,6 +362,19 @@ function authorName(value: unknown): string | undefined {
   return optionalString(value.nickname) || optionalString(value.name) || optionalString(value.unique_id) || optionalString(value.screen_name)
 }
 
+function mediaUrlFromValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return optionalString(value)
+  if (!isRecord(value)) return undefined
+  return optionalString(value.url) || optionalString(value.play_url) || optionalString(value.video_url)
+}
+
+function firstBackupVideoUrl(value: unknown, primary?: string): string | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value
+    .map(mediaUrlFromValue)
+    .find((url): url is string => Boolean(url) && url !== primary)
+}
+
 async function resolveWithDouyinSharePage(fetchImpl: typeof fetch, sourceUrl: string, timeoutMs: number): Promise<ResolvedMedia> {
   const html = await getDouyinSharePage(fetchImpl, sourceUrl, timeoutMs)
   const routerData = parseWindowObject(html, 'window._ROUTER_DATA')
@@ -362,6 +404,43 @@ async function resolveWithDouyinSharePage(fetchImpl: typeof fetch, sourceUrl: st
       duration: durationMs === undefined ? undefined : durationMs / 1_000,
       watermarkStatus: cleaned.watermarkStatus,
       alternateVideoUrl: cleaned.alternate,
+    },
+  }
+}
+
+async function resolveWithBugPk(fetchImpl: typeof fetch, sourceUrl: string, timeoutMs: number): Promise<ResolvedMedia> {
+  const payload = await getJson(
+    fetchImpl,
+    `${BUGPK_DOUYIN_API_ORIGIN}?url=${encodeURIComponent(sourceUrl)}`,
+    timeoutMs,
+    'BugPk 抖音解析接口',
+  )
+  const data = isRecord(payload.data) ? payload.data : null
+  if (Number(payload.code) === 429) {
+    throw new MediaResolverError('BugPk 请求过于频繁，正在自动重试', { code: 'MEDIA_RESOLVER_RATE_LIMITED' })
+  }
+  if (Number(payload.code) !== 200 || !data) {
+    throw new MediaResolverError(serviceMessage(payload.msg, 'BugPk 没有返回可用的视频'), { code: 'MEDIA_RESOLVER_REJECTED' })
+  }
+  const videoUrl = mediaUrlFromValue(data.url) || firstBackupVideoUrl(data.video_backup)
+  if (data.type !== 'video' || !videoUrl) {
+    throw new MediaResolverError('当前抖音链接不是可下载的视频，可能是图集、实况、私密或已删除内容', { code: 'UNSUPPORTED_MEDIA_TYPE' })
+  }
+  const durationMs = optionalNumber(data.duration)
+  return {
+    sourceUrl,
+    platform: 'douyin',
+    type: 'video',
+    title: optionalString(data.title) || optionalString(data.desc),
+    coverUrl: optionalString(data.cover),
+    videoUrl,
+    metadata: {
+      resolver: 'bugpk',
+      author: authorName(data.author),
+      description: optionalString(data.desc),
+      duration: durationMs === undefined ? undefined : durationMs / 1_000,
+      watermarkStatus: 'removed',
+      alternateVideoUrl: firstBackupVideoUrl(data.video_backup, videoUrl),
     },
   }
 }
@@ -541,6 +620,15 @@ export class SocialVideoProvider {
       const errors: unknown[] = []
       try {
         return await resolveWithDouyinSharePage(this.fetchImpl, sourceUrl, this.timeoutMs)
+      } catch (error) {
+        errors.push(error)
+      }
+      try {
+        return await withPublicResolverRetry(() => resolveWithBugPk(
+          this.fetchImpl,
+          sourceUrl,
+          Math.min(this.timeoutMs, BUGPK_ATTEMPT_TIMEOUT_MS),
+        ))
       } catch (error) {
         errors.push(error)
       }

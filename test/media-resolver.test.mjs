@@ -80,7 +80,7 @@ test('抖音链接优先从官方分享页解析视频并生成无水印地址',
   assert.equal(result.metadata.watermarkStatus, 'removed')
 })
 
-test('官方分享页不可解析时回退到抖音 JSON 接口', async () => {
+test('官方分享页不可解析时优先回退到 BugPk 公共 HTTP 接口', async () => {
   const calls = []
   const provider = new SocialVideoProvider({
     fetchImpl: async (url) => {
@@ -94,19 +94,93 @@ test('官方分享页不可解析时回退到抖音 JSON 接口', async () => {
       return new Response(JSON.stringify({
         code: 200,
         data: {
+          type: 'video',
           title: '备用接口视频',
           url: 'https://cdn.example/video-hd.mp4',
-          author: { nickname: '备用作者' },
-          images: '当前为短视频解析模式',
+          author: { name: '备用作者' },
+          duration: 12_345,
+          video_backup: [
+            { quality: '720p', url: 'https://cdn.example/video-720.mp4' },
+          ],
         },
       }), { status: 200, headers: { 'content-type': 'application/json' } })
     },
   })
   const result = await provider.resolve('https://v.douyin.com/abc123/')
   assert.equal(calls.length, 2)
-  assert.match(calls[1], /^https:\/\/api\.xhus\.cn\/api\/douyin\?url=/)
+  assert.match(calls[1], /^https:\/\/api\.bugpk\.com\/api\/douyin\?url=/)
   assert.equal(result.videoUrl, 'https://cdn.example/video-hd.mp4')
+  assert.equal(result.metadata.alternateVideoUrl, 'https://cdn.example/video-720.mp4')
   assert.equal(result.metadata.author, '备用作者')
+  assert.equal(result.metadata.duration, 12.345)
+  assert.equal(result.metadata.resolver, 'bugpk')
+})
+
+test('BugPk 不可用时继续回退到 Xhus，不会中断三源降级链', async () => {
+  const calls = []
+  const provider = new SocialVideoProvider({
+    fetchImpl: async (url) => {
+      calls.push(url)
+      if (url === 'https://v.douyin.com/abc123/') {
+        return new Response('<html><body>missing SSR data</body></html>', { status: 200 })
+      }
+      if (url.startsWith('https://api.bugpk.com/')) {
+        return new Response(JSON.stringify({ code: 503, msg: '临时维护' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({
+        code: 200,
+        data: {
+          title: 'Xhus 备用视频',
+          url: 'https://cdn.example/xhus.mp4',
+          author: { nickname: 'Xhus 作者' },
+          images: '当前为短视频解析模式',
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const result = await provider.resolve('https://v.douyin.com/abc123/')
+  assert.equal(calls.length, 3)
+  assert.match(calls[2], /^https:\/\/api\.xhus\.cn\/api\/douyin\?url=/)
+  assert.equal(result.videoUrl, 'https://cdn.example/xhus.mp4')
+  assert.equal(result.metadata.resolver, 'xhus')
+})
+
+test('BugPk 遇到 TLS 网络错误和接口限流时会自动重试同一条真实链路', async () => {
+  const calls = []
+  let bugPkAttempt = 0
+  const provider = new SocialVideoProvider({
+    fetchImpl: async (url) => {
+      calls.push(url)
+      if (url === 'https://v.douyin.com/retry/') {
+        return new Response('<html><body>missing SSR data</body></html>', { status: 200 })
+      }
+      bugPkAttempt += 1
+      if (bugPkAttempt === 1) throw new TypeError('fetch failed', { cause: new Error('ECONNRESET') })
+      if (bugPkAttempt === 2) {
+        return new Response(JSON.stringify({ code: 429, message: 'too many requests' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({
+        code: 200,
+        data: {
+          type: 'video',
+          title: '重试成功',
+          url: 'https://cdn.example/retry.mp4',
+          author: { name: '作者' },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    },
+  })
+  const result = await provider.resolve('https://v.douyin.com/retry/')
+  assert.equal(bugPkAttempt, 3)
+  assert.equal(calls.length, 4)
+  assert.equal(result.videoUrl, 'https://cdn.example/retry.mp4')
+  assert.equal(result.metadata.resolver, 'bugpk')
 })
 
 test('抖音解析失败不会把第三方返回的 HTML 暴露给界面', async () => {

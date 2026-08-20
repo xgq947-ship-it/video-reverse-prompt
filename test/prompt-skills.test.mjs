@@ -12,9 +12,9 @@ const EXPECTED_SKILL_HASHES = {
 
 const EXPECTED_HOTSTORY_HASHES = {
   'character_assets.md': '6e40033d4f0961717e7d987362b14f3f067344d17d2706e4b29b9ceab84efb46',
-  'cinematic_shots.md': '6fc0ac514029e9c59e175c369ab8b5bf1f8469e80fa65251932be1617e62d164',
-  'script_writer.md': '1ebe9386b04f6faa96632c70dcc54038ce7a1d740083dd0239bd6e37c1e04a64',
-  'shot_plan.md': '6032f59b0365eafb3b85ed2d0d3074d83f6a7a275b3ef1139a4257f0705208e5',
+  'cinematic_shots.md': '9393df364c098b7d2923e9c18f4a63f28185e162ac83a8b13644e4eadfe8f097',
+  'script_writer.md': '16044cb371b7d74d3537d7e7db40843b690f942bde210f952fcf7ea09821dd7e',
+  'shot_plan.md': '6cf5a46ca9be9a8db8ba12f4d5a1968b99f04012e1a2602912fa5d5979b874db',
 }
 
 function hash(content) {

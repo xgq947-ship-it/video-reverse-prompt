@@ -44,6 +44,8 @@ async function execute(request: AutomationRequest): Promise<AutomationResult> {
         reverseResponse: request.reverseResponse,
         duration: request.duration,
         filename: request.filename,
+        storyboardMode: request.storyboardMode,
+        protagonistTags: request.protagonistTags,
         provider: createGenerationProvider(config),
         onProgress: progress,
       })

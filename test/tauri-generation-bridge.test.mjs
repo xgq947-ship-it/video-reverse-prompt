@@ -16,3 +16,8 @@ test('发布包包含完整 Skill，并为 Codex 提供只读工作目录', () =
   assert.match(rust, /VIDEO_REVERSE_PROMPT_SKILL_ROOT/)
   assert.match(rust, /VIDEO_REVERSE_PROMPT_PROJECT_ROOT/)
 })
+
+test('Tauri 生成桥接会传递分镜模式与主角标签', () => {
+  assert.match(rust, /storyboard_mode: Option<String>/)
+  assert.match(rust, /protagonist_tags: Option<Vec<String>>/)
+})

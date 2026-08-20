@@ -37,6 +37,8 @@ struct AutomationRequest {
   reverse_response: Option<String>,
   duration: Option<f64>,
   filename: Option<String>,
+  storyboard_mode: Option<String>,
+  protagonist_tags: Option<Vec<String>>,
   generator: Option<Value>,
   browser_behavior: Option<String>,
   debug: Option<bool>,

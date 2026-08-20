@@ -1,6 +1,6 @@
 [package]
 name = "video-reverse-prompt"
-version = "0.1.0"
+version = "0.2.0"
 description = "Video reverse engineering, script, character, and cinematic prompt studio powered by the user's Gemini Web session"
 authors = ["Video Reverse Prompt"]
 license = "MIT"

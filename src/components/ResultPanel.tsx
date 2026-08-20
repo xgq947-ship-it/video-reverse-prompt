@@ -1,6 +1,6 @@
-import { Check, Copy, FileVideo2, LoaderCircle, RotateCcw, Settings2, Sparkles, WandSparkles } from 'lucide-react'
+import { Check, Copy, FileVideo2, LoaderCircle, RotateCcw, Settings2, Sparkles, Tags, WandSparkles } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import type { AnalysisMode, AnalysisResult, AnalysisStage, ProductionResult } from '../types'
+import type { AnalysisMode, AnalysisResult, AnalysisStage, ProductionResult, StoryboardMode } from '../types'
 
 const VIDEO_MODES: AnalysisMode[] = ['完整反推', '动作优先', '运镜优先', '分镜优先']
 const REVERSE_TABS: [string, string][] = [
@@ -36,6 +36,10 @@ interface Props {
   productionStage: AnalysisStage
   productionStatus: string
   productionError: string
+  storyboardMode: StoryboardMode
+  onStoryboardMode: (value: StoryboardMode) => void
+  protagonistTags: [string, string]
+  onProtagonistTags: (value: [string, string]) => void
   onGenerateProduction: () => void
   generationLabel: string
   onOpenGenerationSettings: () => void
@@ -61,6 +65,10 @@ export function ResultPanel({
   productionStage,
   productionStatus,
   productionError,
+  storyboardMode,
+  onStoryboardMode,
+  protagonistTags,
+  onProtagonistTags,
   onGenerateProduction,
   generationLabel,
   onOpenGenerationSettings,
@@ -71,7 +79,12 @@ export function ResultPanel({
   const analysisBusy = !['idle', 'completed', 'error'].includes(stage)
   const productionBusy = !['idle', 'completed', 'error'].includes(productionStage)
   const busy = analysisBusy || productionBusy
-  const shotCount = duration ? Math.max(1, Math.min(18, Math.ceil(duration / 10))) : null
+  const tenSecondSegmentCount = duration ? Math.max(1, Math.ceil(duration / 10)) : null
+  const sourceShotCount = useMemo(() => {
+    if (!result?.json || typeof result.json !== 'object' || Array.isArray(result.json)) return null
+    const shots = (result.json as Record<string, unknown>).shots
+    return Array.isArray(shots) ? shots.length : null
+  }, [result])
   const selectedResult = phase === 'production' ? productionResult : result
   const content = useMemo(() => resultContent(selectedResult, active), [active, selectedResult])
 
@@ -116,7 +129,7 @@ export function ResultPanel({
     <section className="result-panel panel">
       <div className="result-controls">
         <label>Gemini 反推模式<select value={mode} onChange={(event) => onMode(event.target.value as AnalysisMode)} disabled={busy}>{VIDEO_MODES.map((item) => <option key={item}>{item}</option>)}</select></label>
-        <div className="duration-plan"><span>原片时长</span><strong>{duration ? `${duration.toFixed(1)} 秒${shotCount ? ` · 约 ${shotCount} 镜头` : ''}` : '由视频读取'}</strong></div>
+        <div className="duration-plan"><span>原片时长</span><strong>{duration ? `${duration.toFixed(1)} 秒${storyboardMode === 'ten_second_groups' && tenSecondSegmentCount ? ` · ${tenSecondSegmentCount} 个生成片段` : storyboardMode === 'source_shots' && sourceShotCount ? ` · ${sourceShotCount} 个原片分镜` : ''}` : '由视频读取'}</strong></div>
         <button className="primary-button" onClick={() => onAnalyze()} disabled={busy}>{analysisBusy ? <LoaderCircle className="spin" size={16} /> : result ? <RotateCcw size={16} /> : <Sparkles size={16} />}{analysisBusy ? status : result ? '重新反推' : '开始反推'}</button>
       </div>
 
@@ -130,12 +143,19 @@ export function ResultPanel({
           <button className={phase === 'production' ? 'active' : ''} disabled={!productionResult} onClick={() => productionResult && selectTab('production', 'SHOT_PROMPTS')}><b>2</b><span>剧本 · 角色 · 多分镜<small>{productionBusy ? productionStatus : productionResult ? '已完成' : '等待生成'}</small></span></button>
         </div>
 
-        {!productionResult && <div className="production-callout">
-          <div><WandSparkles size={19} /><span><strong>第二步：生成短视频剧本</strong><small>使用完整 HotStory 模板与 3 份 Skill 原文，生成角色和可直接复制的多分镜提示词。</small></span></div>
+        <div className="production-callout">
+          <div><WandSparkles size={19} /><span><strong>第二步：生成短视频剧本</strong><small>选择生成片段划分方式；可为 1–2 个主角指定已有标签，留空则自动生成人物描述。</small></span></div>
+          <div className="production-options">
+            <div className="storyboard-mode" role="group" aria-label="分镜划分方式">
+              <button type="button" className={storyboardMode === 'ten_second_groups' ? 'active' : ''} onClick={() => onStoryboardMode('ten_second_groups')} disabled={busy}><strong>每 10 秒一段</strong><small>段内可保留多个原分镜，减少生成次数</small></button>
+              <button type="button" className={storyboardMode === 'source_shots' ? 'active' : ''} onClick={() => onStoryboardMode('source_shots')} disabled={busy}><strong>沿用原片分镜</strong><small>按原剪辑点和原时长逐个生成</small></button>
+            </div>
+            <div className="protagonist-tags"><span><Tags size={12} />主角标签（可选）</span><label><b>@</b><input value={protagonistTags[0]} onChange={(event) => onProtagonistTags([event.target.value.replace(/^@/, ''), protagonistTags[1]])} placeholder="主角1标签" disabled={busy} maxLength={32} /></label><label><b>@</b><input value={protagonistTags[1]} onChange={(event) => onProtagonistTags([protagonistTags[0], event.target.value.replace(/^@/, '')])} placeholder="主角2标签" disabled={busy} maxLength={32} /></label></div>
+          </div>
           <div className="production-actions"><button className="model-link" onClick={onOpenGenerationSettings} disabled={productionBusy}><Settings2 size={13} />{generationLabel}</button><button className="production-button" onClick={onGenerateProduction} disabled={busy}>{productionBusy ? <LoaderCircle className="spin" size={15} /> : <WandSparkles size={15} />}{productionBusy ? productionStatus : '生成短视频剧本'}</button></div>
           {productionBusy && <div className="production-progress"><span /></div>}
           {productionError && <div className="inline-generation-error">{productionError}</div>}
-        </div>}
+        </div>
 
         {(phase === 'reverse' || productionResult) && <>
           {(phase === 'reverse' ? result.parseWarning : productionResult?.parseWarning) && <div className="warning-box">{phase === 'reverse' ? result.parseWarning : productionResult?.parseWarning}</div>}
@@ -144,7 +164,7 @@ export function ResultPanel({
           </div>
           <div className="result-copy"><button className="quiet-button" onClick={copy}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? '已复制' : active === 'SHOT_PROMPTS' ? '复制全部分镜' : '复制'}</button></div>
           <pre className="result-text">{content || '此部分没有可显示的内容，请查看原文。'}</pre>
-          {phase === 'reverse' ? <div className="refine-actions"><button disabled={busy} onClick={() => onAnalyze('逐项检查并补强所有动作、身体重心、视线、手部、道具和物理细节，不得缩短任何已有有效提示词。')}>强化动作</button><button disabled={busy} onClick={() => onAnalyze('逐项检查并补强机位、景别、空间距离、单一运镜、焦点和光线逻辑，不得缩短任何已有有效提示词。')}>强化镜头</button><button disabled={busy} onClick={() => onAnalyze('重新核对总时长、全部 Shot 与每条时间码，确保时间线连续并完整输出原版九个分区。')}>校准时间线</button></div> : <div className="refine-actions production-footer"><span>{generationLabel} · HotStory 原始模板 / Skill 原文</span><button disabled={busy} onClick={onGenerateProduction}><RotateCcw size={12} />重新生成剧本分镜</button></div>}
+          {phase === 'reverse' ? <div className="refine-actions"><button disabled={busy} onClick={() => onAnalyze('逐项检查并补强所有动作、身体重心、视线、手部、道具和物理细节，不得缩短任何已有有效提示词。')}>强化动作</button><button disabled={busy} onClick={() => onAnalyze('逐项检查并补强机位、景别、空间距离、单一运镜、焦点和光线逻辑，不得缩短任何已有有效提示词。')}>强化镜头</button><button disabled={busy} onClick={() => onAnalyze('重新核对总时长、全部 Shot 与每条时间码，确保时间线连续并完整输出原版九个分区。')}>校准时间线</button></div> : <div className="refine-actions production-footer"><span>{generationLabel} · {storyboardMode === 'ten_second_groups' ? '10 秒生成片段' : '原片分镜时长'}{protagonistTags.some((tag) => tag.trim()) ? ' · 使用主角标签' : ' · AI 人物描述'}</span><button disabled={busy} onClick={onGenerateProduction}><RotateCcw size={12} />按当前设置重新生成</button></div>}
         </>}
       </div>}
     </section>

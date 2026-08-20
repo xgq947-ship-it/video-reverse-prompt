@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { renderHotStoryPrompt } from '../prompts/hotstory.js'
 import { loadVerbatimSkills } from '../prompts/skills.js'
+import type { StoryboardMode } from '../types.js'
 import type { GenerationProvider } from './providers.js'
 
 type JsonRecord = Record<string, unknown>
@@ -9,6 +10,8 @@ export interface ProductionPipelineInput {
   reverseResponse: string
   duration?: number
   filename?: string
+  storyboardMode?: StoryboardMode
+  protagonistTags?: string[]
   provider: GenerationProvider
   onProgress?: (stage: string, message: string) => void
 }
@@ -34,7 +37,9 @@ interface CharacterDraft {
 interface CharacterAsset extends CharacterDraft {
   id: string
   reference_token: string
-  identity_basis: 'verified_role_visualization'
+  prompt_reference: string
+  user_protagonist_tag?: string
+  identity_basis: 'verified_role_visualization' | 'user_protagonist_tag'
   disclosure: string
   image_settings: {
     model: string
@@ -56,6 +61,28 @@ interface ShotPlan {
   active_character_ids: string[]
   event_ids: string[]
   source_ids: string[]
+  source_shot_ids: string[]
+  source_fact_ids: string[]
+  internal_cut_times: number[]
+  contains_multiple_source_shots: boolean
+}
+
+interface SourceShot {
+  id: string
+  fact_id: string
+  start_second: number
+  end_second: number
+  content: JsonRecord
+  derived_fallback?: boolean
+}
+
+interface GenerationSegment {
+  index: number
+  start_second: number
+  end_second: number
+  source_shot_ids: string[]
+  source_fact_ids: string[]
+  internal_cut_times: number[]
 }
 
 interface ShotPromptDraft {
@@ -139,6 +166,95 @@ function resolveDuration(input: number | undefined, reverseJson: JsonRecord): nu
   if (!duration) throw new Error('无法读取原视频时长，请重新导入视频后再生成短视频剧本。')
   if (duration > 180) throw new Error('HotStory 短视频生成流程当前支持最长 180 秒的视频。')
   return Math.max(1, Math.round(duration * 1000) / 1000)
+}
+
+function timestampSeconds(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  if (/^\d+(?:\.\d+)?$/.test(trimmed)) return Number(trimmed)
+  const parts = trimmed.split(':').map(Number)
+  if (parts.some((part) => !Number.isFinite(part)) || parts.length < 2 || parts.length > 3) return undefined
+  const seconds = parts.reduce((total, part) => total * 60 + part, 0)
+  return Number.isFinite(seconds) ? seconds : undefined
+}
+
+function sourceShotBoundary(shot: JsonRecord, kind: 'start' | 'end'): number | undefined {
+  const keys = kind === 'start'
+    ? ['start', 'start_second', 'start_seconds', 'start_time', 'startTime']
+    : ['end', 'end_second', 'end_seconds', 'end_time', 'endTime']
+  for (const key of keys) {
+    const seconds = timestampSeconds(shot[key])
+    if (seconds !== undefined) return seconds
+  }
+  return undefined
+}
+
+function extractSourceShots(reverseJson: JsonRecord, duration: number, factIds: string[]): SourceShot[] {
+  const rawShots = Array.isArray(reverseJson.shots) ? reverseJson.shots : []
+  const records = rawShots.map((shot) => asRecord(shot, 'reverse shot'))
+  const starts = records.map((shot) => sourceShotBoundary(shot, 'start'))
+  const parsed = records.flatMap((shot, index): SourceShot[] => {
+    const start = starts[index]
+    const explicitEnd = sourceShotBoundary(shot, 'end')
+    const end = explicitEnd ?? starts[index + 1] ?? duration
+    if (start === undefined || !Number.isFinite(end) || end <= start) return []
+    const clampedStart = Math.max(0, Math.min(duration, start))
+    const clampedEnd = Math.max(0, Math.min(duration, end))
+    if (clampedEnd <= clampedStart) return []
+    return [{
+      id: `source_shot_${String(index + 1).padStart(2, '0')}`,
+      fact_id: factIds[index] ?? factIds[0] ?? '',
+      start_second: Math.round(clampedStart * 1000) / 1000,
+      end_second: Math.round(clampedEnd * 1000) / 1000,
+      content: shot,
+    }]
+  }).sort((left, right) => left.start_second - right.start_second)
+  if (parsed.length) return parsed
+  return [{
+    id: 'source_shot_01',
+    fact_id: factIds[0] ?? '',
+    start_second: 0,
+    end_second: duration,
+    content: { overview: reverseJson },
+    derived_fallback: true,
+  }]
+}
+
+function buildGenerationSegments(mode: StoryboardMode, duration: number, sourceShots: SourceShot[]): GenerationSegment[] {
+  const windows = mode === 'source_shots'
+    ? sourceShots.map((shot) => [shot.start_second, shot.end_second] as const)
+    : Array.from({ length: Math.ceil(duration / 10) }, (_, index) => [index * 10, Math.min(duration, (index + 1) * 10)] as const)
+  if (mode === 'source_shots' && (!sourceShots.length || sourceShots.some((shot) => shot.derived_fallback || shot.end_second <= shot.start_second))) {
+    throw new Error('原视频分镜缺少有效起止时间，请先用“分镜优先”重新反推视频。')
+  }
+  if (windows.length > 80) throw new Error('原视频分镜超过 80 个，请改用“每 10 秒生成片段”模式。')
+  return windows.map(([start, end], index) => {
+    const overlapping = sourceShots.filter((shot) => shot.start_second < end && shot.end_second > start)
+    const internalCutTimes = sourceShots
+      .map((shot) => shot.start_second)
+      .filter((cut) => cut > start && cut < end)
+      .map((cut) => Math.round(cut * 1000) / 1000)
+    return {
+      index: index + 1,
+      start_second: start,
+      end_second: end,
+      source_shot_ids: overlapping.map((shot) => shot.id),
+      source_fact_ids: [...new Set(overlapping.map((shot) => shot.fact_id).filter(Boolean))],
+      internal_cut_times: internalCutTimes,
+    }
+  })
+}
+
+function normalizeProtagonistTags(values: string[] | undefined): string[] {
+  const tags = (values ?? []).map((value) => value.trim().replace(/^@+/, '')).filter(Boolean)
+  if (tags.length > 2) throw new Error('主角标签最多填写 2 个。')
+  if (tags.some((tag) => !/^[\p{L}\p{N}_-]{1,32}$/u.test(tag))) {
+    throw new Error('主角标签只能包含中英文、数字、下划线或短横线，且不能超过 32 个字符。')
+  }
+  if (new Set(tags.map((tag) => tag.toLocaleLowerCase())).size !== tags.length) throw new Error('两个主角标签不能相同。')
+  return tags.map((tag) => `@${tag}`)
 }
 
 function buildVerifiedContext(raw: string, sections: Record<string, string>, reverseJson: JsonRecord, filename: string): JsonRecord {
@@ -311,6 +427,7 @@ function normalizeCharacters(value: JsonRecord, validFactIds: Set<string>): { st
     return {
       id: `char_${String(number).padStart(2, '0')}`,
       reference_token: `CHAR_${String(number).padStart(2, '0')}`,
+      prompt_reference: `[[CHAR_${String(number).padStart(2, '0')}]]`,
       prompt_label: requireString(item, 'prompt_label', 2),
       role,
       story_function: requireString(item, 'story_function', 2),
@@ -335,31 +452,60 @@ function normalizeCharacters(value: JsonRecord, validFactIds: Set<string>): { st
   return { styleBible, characters }
 }
 
+function applyProtagonistTags(characters: CharacterAsset[], tags: string[]): CharacterAsset[] {
+  let tagIndex = 0
+  return characters.map((character) => {
+    if (character.role !== 'lead' || tagIndex >= tags.length) return character
+    const tag = tags[tagIndex]
+    tagIndex += 1
+    return {
+      ...character,
+      prompt_reference: tag,
+      user_protagonist_tag: tag,
+      identity_basis: 'user_protagonist_tag',
+      disclosure: '人物身份与外观直接使用用户提供的主角标签，不由 AI 重新描述。',
+      image_prompt: '',
+    }
+  })
+}
+
+function charactersForPrompt(characters: CharacterAsset[]): JsonRecord[] {
+  return characters.map((character) => {
+    if (!character.user_protagonist_tag) return character as unknown as JsonRecord
+    return {
+      id: character.id,
+      role: character.role,
+      prompt_label: character.prompt_label,
+      prompt_reference: character.prompt_reference,
+      identity_basis: character.identity_basis,
+      identity_instruction: '只使用 prompt_reference 指向的标签人物；不得补写、猜测或覆盖其外貌、脸部、发型、体型与服装。',
+      acting_profile: character.acting_profile,
+      voice_prompt: character.voice_prompt,
+    }
+  })
+}
+
 function exactScriptText(value: unknown, script: string): string {
   const candidate = asString(value)
   return candidate && script.includes(candidate) ? candidate : ''
 }
 
-function shotWindow(index: number, duration: number, count: number): [number, number] {
-  const start = Math.round((index * duration / count) * 1000) / 1000
-  const end = Math.round(((index + 1) * duration / count) * 1000) / 1000
-  return [start, end]
-}
-
 function normalizeShotPlan(
   value: JsonRecord,
-  count: number,
-  duration: number,
+  segments: GenerationSegment[],
+  mode: StoryboardMode,
   script: string,
   characterIds: Set<string>,
   eventIds: Set<string>,
   sourceIds: Set<string>,
 ): ShotPlan[] {
-  if (!Array.isArray(value.shots) || value.shots.length !== count) throw new Error(`镜头计划必须恰好包含 ${count} 个镜头。`)
+  if (!Array.isArray(value.shots) || value.shots.length !== segments.length) throw new Error(`镜头计划必须恰好包含 ${segments.length} 个生成片段。`)
   return value.shots.map((entry, index) => {
     const item = asRecord(entry, 'shot')
-    const [start, end] = shotWindow(index, duration, count)
-    if (end - start > 10.001) throw new Error('单个镜头不得超过 10 秒。')
+    const segment = segments[index]
+    const start = segment.start_second
+    const end = segment.end_second
+    if (mode === 'ten_second_groups' && end - start > 10.001) throw new Error('10 秒模式的单个生成片段不得超过 10 秒。')
     return {
       shot_id: `shot_${String(index + 1).padStart(2, '0')}`,
       title: requireString(item, 'title', 2).replace(/\bS(?:HOT)?\s*\d{1,3}\s*[:：-]?\s*/gi, '').trim() || `镜头 ${index + 1}`,
@@ -371,6 +517,10 @@ function normalizeShotPlan(
       active_character_ids: [...new Set(asStringArray(item.active_character_ids).filter((id) => characterIds.has(id)))],
       event_ids: [...new Set(asStringArray(item.event_ids).filter((id) => eventIds.has(id)))],
       source_ids: [...new Set(asStringArray(item.source_ids).filter((id) => sourceIds.has(id)))],
+      source_shot_ids: segment.source_shot_ids,
+      source_fact_ids: segment.source_fact_ids,
+      internal_cut_times: segment.internal_cut_times,
+      contains_multiple_source_shots: segment.source_shot_ids.length > 1,
     }
   })
 }
@@ -417,6 +567,22 @@ function attachAudio(body: string, ambient: string, narration: string, dialogue:
   return lines.join('\n').trim()
 }
 
+function enforceCharacterReferences(body: string, plan: ShotPlan, characterById: Map<string, CharacterAsset>): string {
+  let result = body.trim()
+  for (const characterId of plan.active_character_ids) {
+    const character = characterById.get(characterId)
+    if (!character) continue
+    const generatedToken = `[[${character.reference_token}]]`
+    if (character.user_protagonist_tag) result = result.replaceAll(generatedToken, character.prompt_reference)
+    if (result.includes(character.prompt_reference)) continue
+    const anchor = character.user_protagonist_tag
+      ? `${character.prompt_reference} 作为当前镜头人物，身份和外观完全由该标签锁定。`
+      : `${character.prompt_reference}：${character.visual_anchor}，当前镜头保持身份与造型一致。`
+    result = `人物引用\n${anchor}\n\n${result}`
+  }
+  return result
+}
+
 function formatCharacters(characters: CharacterAsset[], styleBible: string): string {
   if (!characters.length) return `全片视觉圣经\n${styleBible}\n\n原视频中没有需要跨镜头复用的明确角色，因此不生成角色参考图。`
   return [
@@ -426,11 +592,9 @@ function formatCharacters(characters: CharacterAsset[], styleBible: string): str
       `角色 ID：${character.id}`,
       `角色类型：${character.role === 'lead' ? '主角' : '配角'}`,
       `故事功能：${character.story_function}`,
-      `视觉锚点：${character.visual_anchor}`,
-      `服装锚点：${character.wardrobe_anchor}`,
-      '',
-      '### 角色参考图提示词',
-      character.image_prompt,
+      ...(character.user_protagonist_tag
+        ? ['', '### 用户主角标签', `${character.user_protagonist_tag}（直接使用该标签人物，不生成或覆盖人物外貌）`]
+        : [`视觉锚点：${character.visual_anchor}`, `服装锚点：${character.wardrobe_anchor}`, '', '### 角色参考图提示词', character.image_prompt]),
       '',
       '### 表演主档案',
       character.acting_profile,
@@ -454,15 +618,29 @@ export async function generateProductionPackage(input: ProductionPipelineInput):
   if (!sections.JSON) throw new Error('Gemini 反推结果缺少 ---JSON--- 分区，请先重新完成视频反推。')
   const reverseJson = parseJsonContent(sections.JSON)
   const duration = resolveDuration(input.duration, reverseJson)
+  const storyboardMode: StoryboardMode = input.storyboardMode === 'source_shots' ? 'source_shots' : 'ten_second_groups'
+  const protagonistTags = normalizeProtagonistTags(input.protagonistTags)
   const filename = input.filename?.trim() || 'reference-video.mp4'
   const context = buildVerifiedContext(reverseResponse, sections, reverseJson, filename)
-  const contextJson = JSON.stringify(context, null, 2)
   const topic = asString(context.topic) || '参考视频'
   const skills = await loadVerbatimSkills()
+  const validFactIds = new Set((context.facts as JsonRecord[]).map((item) => asString(item.id)))
+  const sourceShots = extractSourceShots(reverseJson, duration, [...validFactIds])
+  const segments = buildGenerationSegments(storyboardMode, duration, sourceShots)
+  context.source_shots = sourceShots
+  const contextJson = JSON.stringify(context, null, 2)
 
-  notify('writing-script', '正在根据反推结果生成短视频剧本')
-  const scriptBasePrompt = await renderHotStoryPrompt('script_writer', { duration, context: contextJson })
-  const scriptPrompt = `${scriptBasePrompt}\n\n<VIDEO_REVERSE_PROMPT_ADAPTATION>\n本项目的“已核验素材”来自用户所选原视频的 Gemini 反推结果。必须以 reverse_analysis_verbatim、reverse_analysis_sections 与 reverse_analysis_json 为完整依据；不得把反推中没有出现的内容写成事实。时间线、人物动作、对白和声音应复刻原片可见/可听信息，同时把结果整理成可继续生成角色与多分镜提示词的短视频剧本。输入中提供的 source_id、fact_id、event_id 均为该原视频证据的稳定引用 ID。\n</VIDEO_REVERSE_PROMPT_ADAPTATION>`
+  notify('writing-script', storyboardMode === 'ten_second_groups' ? '正在按 10 秒片段无损重排原视频剧本' : '正在按原视频分镜整理剧本')
+  const reblockingRule = storyboardMode === 'ten_second_groups'
+    ? '按从 0 秒开始、每段最多 10 秒重新编排时间块。一个 10 秒时间块可以原样容纳多个原视频镜头与剪辑点，以减少后续视频生成次数；必须保持原镜头顺序、镜头内容、人物动作、对白、旁白与事件因果完全不变，只能改变分段边界和排版。'
+    : '严格沿用 reverse_analysis_json.shots 中每个原视频镜头的起止时间、顺序与内容，不合并、不拆分、不改写镜头。'
+  const scriptBasePrompt = await renderHotStoryPrompt('script_writer', {
+    duration,
+    segmentation_rule: reblockingRule,
+    segment_plan: JSON.stringify(segments, null, 2),
+    context: contextJson,
+  })
+  const scriptPrompt = `${scriptBasePrompt}\n\n<VIDEO_REVERSE_PROMPT_ADAPTATION>\n本项目的“已核验素材”来自用户所选原视频的 Gemini 反推结果。必须以 reverse_analysis_verbatim、reverse_analysis_sections 与 reverse_analysis_json 为完整依据；不得把反推中没有出现的内容写成事实。${reblockingRule} 不得为了“更有戏剧性”增删或改写原视频的剧本内容、分镜内容、人物、场景、动作、对白、旁白、声音或叙事结果。输入中提供的 source_id、fact_id、event_id 均为该原视频证据的稳定引用 ID。\n</VIDEO_REVERSE_PROMPT_ADAPTATION>`
   const scriptResponse = await input.provider.generateText(
     '真实性高于戏剧性。剧本只能使用输入中的已核验事实和真实 ID。',
     scriptPrompt,
@@ -478,7 +656,6 @@ export async function generateProductionPackage(input: ProductionPipelineInput):
     lira_skill: skills['lira-image-prompts'].content,
     acting_skill: skills['acting-ai-video'].content,
   })
-  const validFactIds = new Set((context.facts as JsonRecord[]).map((item) => asString(item.id)))
   const rawCharacters = await generateStructured(
     input.provider,
     '你是 Lira 图像提示词优化师与影视表演导演。只使用已核验人物依据。',
@@ -486,14 +663,24 @@ export async function generateProductionPackage(input: ProductionPipelineInput):
     characterSchema([...validFactIds]),
     (value) => { normalizeCharacters(value, validFactIds) },
   )
-  const { styleBible, characters } = normalizeCharacters(rawCharacters, validFactIds)
+  const normalizedCharacters = normalizeCharacters(rawCharacters, validFactIds)
+  const styleBible = normalizedCharacters.styleBible
+  const characters = applyProtagonistTags(normalizedCharacters.characters, protagonistTags)
+  if (protagonistTags.length > characters.filter((character) => character.role === 'lead').length) {
+    throw new Error(`填写了 ${protagonistTags.length} 个主角标签，但剧本只识别到 ${characters.filter((character) => character.role === 'lead').length} 个主角。`)
+  }
 
-  const targetShotCount = Math.max(1, Math.min(18, Math.ceil(duration / 10)))
-  notify('planning-shots', `正在规划 ${targetShotCount} 个连续分镜`)
+  const targetShotCount = segments.length
+  notify('planning-shots', storyboardMode === 'ten_second_groups' ? `正在规划 ${targetShotCount} 个 10 秒生成片段` : `正在沿用 ${targetShotCount} 个原视频分镜`)
   const shotPlanPrompt = await renderHotStoryPrompt('shot_plan', {
     topic,
     duration,
     target_shot_count: targetShotCount,
+    segmentation_mode: storyboardMode,
+    segmentation_rule: storyboardMode === 'ten_second_groups'
+      ? '每个生成片段最多 10 秒；片段内必须按 internal_cut_times 保留一个或多个原视频镜头，可使用受控硬切。'
+      : '每个生成片段与一个原视频镜头一一对应，起止时间必须完全沿用，禁止合并或拆分。',
+    segment_plan: JSON.stringify(segments, null, 2),
     script,
     characters: JSON.stringify(characters, null, 2),
     context: contextJson,
@@ -506,9 +693,9 @@ export async function generateProductionPackage(input: ProductionPipelineInput):
     '你是严格的纪录片分镜规划师。不得改写旁白或创造现实事实。',
     shotPlanPrompt,
     shotPlanSchema(targetShotCount, [...characterIds], [...eventIds], [...sourceIds]),
-    (value) => { normalizeShotPlan(value, targetShotCount, duration, script, characterIds, eventIds, sourceIds) },
+    (value) => { normalizeShotPlan(value, segments, storyboardMode, script, characterIds, eventIds, sourceIds) },
   )
-  const shotPlan = normalizeShotPlan(rawShotPlan, targetShotCount, duration, script, characterIds, eventIds, sourceIds)
+  const shotPlan = normalizeShotPlan(rawShotPlan, segments, storyboardMode, script, characterIds, eventIds, sourceIds)
 
   const chunks: ShotPlan[][] = []
   for (let offset = 0; offset < shotPlan.length; offset += 4) chunks.push(shotPlan.slice(offset, offset + 4))
@@ -519,8 +706,14 @@ export async function generateProductionPackage(input: ProductionPipelineInput):
     const activeCharacters = characters.filter((character) => activeIds.has(character.id))
     const cinematicPrompt = await renderHotStoryPrompt('cinematic_shots', {
       style_bible: styleBible,
-      characters: JSON.stringify(activeCharacters, null, 2),
+      characters: JSON.stringify(charactersForPrompt(activeCharacters), null, 2),
       shots: JSON.stringify(chunk, null, 2),
+      character_reference_rule: protagonistTags.length
+        ? '带 user_protagonist_tag 的主角必须逐字使用 prompt_reference（例如 @标签），不得再写该人物的外貌、脸部、发型、体型或服装描述；其他角色使用其 [[CHAR_XX]]。'
+        : '每个角色使用其 prompt_reference（即 [[CHAR_XX]]），并用已生成的视觉锚点保持一致。',
+      segment_editing_rule: storyboardMode === 'ten_second_groups'
+        ? '一个生成片段可以包含多个原视频镜头。必须按 source_shot_ids 的顺序与 internal_cut_times 使用受控硬切，逐个保留全部原镜头内容，不得融合、删减、替换或创造镜头。'
+        : '一个生成片段只对应一个原视频镜头，严格保持原时长、原动作和原镜头内容，不得增加片内硬切。',
       previous_prompts: '{}',
       acting_skill: skills['acting-ai-video'].content,
       cinedance_skill: skills['cinedance-higgsfield'].content,
@@ -540,18 +733,10 @@ export async function generateProductionPackage(input: ProductionPipelineInput):
   const shots: JsonRecord[] = shotPlan.map((plan) => {
     const generatedPrompt = generated.get(plan.shot_id)
     if (!generatedPrompt) throw new Error(`缺少 ${plan.shot_id} 的成片提示词。`)
-    let body = generatedPrompt.prompt_body_template.trim()
-    for (const characterId of plan.active_character_ids) {
-      const character = characterById.get(characterId)
-      if (!character) continue
-      const token = `[[${character.reference_token}]]`
-      if (!body.includes(token)) {
-        body = `人物锚点\n${token}：${character.visual_anchor}，当前镜头保持身份与造型一致。\n\n${body}`
-      }
-    }
+    const body = enforceCharacterReferences(generatedPrompt.prompt_body_template, plan, characterById)
     const voiceLines = plan.active_character_ids.flatMap((id) => {
       const character = characterById.get(id)
-      return character?.voice_prompt ? [`[[${character.reference_token}]] 固定声线：${character.voice_prompt}`] : []
+      return character?.voice_prompt ? [`${character.prompt_reference} 固定声线：${character.voice_prompt}`] : []
     })
     const completePrompt = attachAudio(body, generatedPrompt.ambient_audio, plan.narration, plan.dialogue, plan.dialogue ? voiceLines : [])
     return {
@@ -566,7 +751,7 @@ export async function generateProductionPackage(input: ProductionPipelineInput):
   })
 
   const packageData: JsonRecord = {
-    version: '1.2',
+    version: '1.3',
     generated_at: new Date().toISOString(),
     source_filename: filename,
     source_reverse_prompt_sha256: sha256(reverseResponse),
@@ -574,8 +759,11 @@ export async function generateProductionPackage(input: ProductionPipelineInput):
     llm_profile: `${scriptResponse.provider}:${scriptResponse.model}`,
     generation_provider: scriptResponse.provider,
     generation_model: scriptResponse.model,
-    max_shot_duration_seconds: 10,
-    generation_mode: 'ai_optimized',
+    storyboard_mode: storyboardMode,
+    storyboard_mode_label: storyboardMode === 'ten_second_groups' ? '每 10 秒一个生成片段（片段内可含多个原分镜）' : '沿用原视频分镜时长',
+    protagonist_tags: protagonistTags,
+    max_shot_duration_seconds: storyboardMode === 'ten_second_groups' ? 10 : Math.max(...shots.map((shot) => Number(shot.duration_seconds))),
+    generation_mode: storyboardMode === 'ten_second_groups' ? 'lossless_10_second_reblock' : 'source_shot_timing',
     warnings: [],
     prompt_preservation: 'lossless',
     style_bible: styleBible,

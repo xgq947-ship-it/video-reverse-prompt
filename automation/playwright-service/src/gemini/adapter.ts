@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import type { Browser, Page } from 'playwright-core'
 import { AutomationError, ERROR_MESSAGES } from '../errors.js'
@@ -67,14 +67,24 @@ export class GeminiAdapter {
   }
 
   async analyzeFile(filePath: string, prompt: string): Promise<string> {
-    const file = await readFile(filePath)
+    const file = await stat(filePath)
     const mimeType = MIME_TYPES[extname(filePath).toLowerCase()] ?? 'video/mp4'
-    const asset = await this.uploadFile({
-      fileName: basename(filePath),
-      mimeType,
-      bodyBase64: file.toString('base64'),
-      byteLength: file.length,
-    })
+    let asset: GeminiAsset
+    try {
+      asset = await this.uploadFile({
+        filePath,
+        fileName: basename(filePath),
+        mimeType,
+        byteLength: file.size,
+      })
+    } catch (error) {
+      if (error instanceof AutomationError) throw error
+      throw new AutomationError(
+        'UPLOAD_FAILED',
+        '视频上传失败，请重试；若问题持续，请重新导入视频。',
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      )
+    }
     return this.streamGenerate(prompt, [asset], await loadGeminiConversation())
   }
 
@@ -142,14 +152,18 @@ export class GeminiAdapter {
   }
 
   private async uploadFile(
-    file: { fileName: string; mimeType: string; bodyBase64: string; byteLength: number },
+    file: { filePath: string; fileName: string; mimeType: string; byteLength: number },
   ): Promise<GeminiAsset> {
     const bootstrap = this.requireBootstrap()
     if (!bootstrap.feedIds.length) throw new AutomationError('UPLOAD_FAILED', 'Gemini HTTP 上传通道不可用，请重新打开 Gemini 后重试。')
-    const timeoutMs = 300_000
+    // Large, high-resolution source videos can take several minutes on the
+    // upstream Gemini resumable endpoint. The previous five-minute limit was
+    // too close to real-world uploads (65 MB took about 4m50s in verification).
+    const timeoutMs = 900_000
     const failures: string[] = []
+    let body: Buffer | null = null
     for (const feedId of bootstrap.feedIds) {
-      const start = await this.pageFetch({
+      const start = await this.contextFetch({
         url: GEMINI_UPLOAD_ENDPOINT,
         method: 'POST',
         headers: {
@@ -165,7 +179,10 @@ export class GeminiAdapter {
       if (!start.ok) { failures.push(`初始化 HTTP ${start.status}`); continue }
       const uploadUrl = start.headers['x-goog-upload-url'] || start.headers.location
       if (!uploadUrl) { failures.push('未返回续传地址'); continue }
-      const finalized = await this.pageFetch({
+      // Do not serialize video bytes through page.evaluate. A 65 MB video becomes
+      // roughly 87 MB of Base64 and can crash the Gemini renderer/CDP target.
+      body ??= await readFile(file.filePath)
+      const finalized = await this.contextFetch({
         url: uploadUrl,
         method: 'POST',
         headers: {
@@ -173,7 +190,7 @@ export class GeminiAdapter {
           'x-goog-upload-offset': '0',
           'x-tenant-id': 'bard-storage',
         },
-        bodyBase64: file.bodyBase64,
+        binaryBody: body,
       }, timeoutMs)
       const resourcePath = finalized.text.trim()
       if (finalized.ok && resourcePath.startsWith('/contrib_service/')) {
@@ -224,24 +241,17 @@ export class GeminiAdapter {
   }
 
   private async pageFetch(
-    spec: { url: string; method: string; headers: Record<string, string>; textBody?: string; bodyBase64?: string },
+    spec: { url: string; method: string; headers: Record<string, string>; textBody?: string },
     timeoutMs: number,
   ): Promise<HttpResponse> {
     return this.requirePage().evaluate(async ({ spec: request, timeout }) => {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), timeout)
       try {
-        let body: BodyInit | undefined = request.textBody
-        if (request.bodyBase64) {
-          const binary = atob(request.bodyBase64)
-          const bytes = new Uint8Array(binary.length)
-          for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
-          body = bytes.buffer
-        }
         const response = await fetch(request.url, {
           method: request.method,
           headers: request.headers,
-          body,
+          body: request.textBody,
           credentials: 'include',
           signal: controller.signal,
         })
@@ -258,6 +268,36 @@ export class GeminiAdapter {
         clearTimeout(timer)
       }
     }, { spec, timeout: timeoutMs })
+  }
+
+  private async contextFetch(
+    spec: { url: string; method: string; headers: Record<string, string>; textBody?: string; binaryBody?: Buffer },
+    timeoutMs: number,
+  ): Promise<HttpResponse> {
+    try {
+      const response = await this.requirePage().context().request.fetch(spec.url, {
+        method: spec.method,
+        headers: spec.headers,
+        data: spec.binaryBody ?? spec.textBody,
+        timeout: timeoutMs,
+        failOnStatusCode: false,
+      })
+      return {
+        ok: response.ok(),
+        status: response.status(),
+        statusText: response.statusText(),
+        text: await response.text(),
+        headers: response.headers(),
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        statusText: error instanceof Error ? error.message : String(error),
+        text: '',
+        headers: {},
+      }
+    }
   }
 
   private async throwIfHumanVerification(): Promise<void> {

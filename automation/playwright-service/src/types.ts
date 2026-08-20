@@ -3,6 +3,7 @@ import type { GeneratorConfig } from './generation/providers.js'
 
 export type BrowserBehavior = 'show' | 'background' | 'minimize'
 export type MediaType = 'video'
+export type StoryboardMode = 'ten_second_groups' | 'source_shots'
 
 export interface AutomationRequest {
   command: 'open' | 'check-login' | 'compatibility' | 'analyze' | 'refine' | 'resolve-video' | 'generate-production' | 'generator-status'
@@ -15,6 +16,8 @@ export interface AutomationRequest {
   reverseResponse?: string
   duration?: number
   filename?: string
+  storyboardMode?: StoryboardMode
+  protagonistTags?: string[]
   generator?: GeneratorConfig
   browserBehavior?: BrowserBehavior
   debug?: boolean
